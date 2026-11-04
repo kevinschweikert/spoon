@@ -1,18 +1,21 @@
 name = "spoon"
 version = "1.0.0"
 
-description = "A crawler to extract parts from a presentable soup"
+description = "ladle your presentable soup"
 licences = ["MIT"]
 repository = { type = "tangled", user = "kevinschweikert", repo = "spoon" }
 
 [dependencies]
-gleam_stdlib = ">= 1.0.0 and < 2.0.0"
 gleam_otp = ">= 1.3.0 and < 2.0.0"
 presentable_soup = ">= 2.0.0 and < 3.0.0"
 gleam_http = ">= 4.5.0 and < 5.0.0"
-gleam_httpc = ">= 5.0.0 and < 6.0.0"
+# use hex managed when > 5.0.0 is released
+gleam_httpc = {git = "https://github.com/kevinschweikert/httpc", ref="feat/max-size-options"}
 gleam_erlang = ">= 1.3.0 and < 2.0.0"
-argv = ">= 1.1.0 and < 2.0.0"
+# use hex managed when > 1.0.5 is released
+gleam_stdlib = {git = "https://github.com/gleam-lang/stdlib", ref = "main"}
+# use hex managed when 1.0.0 is released
+grip = {git = "https://tangled.org/kevinschweikert.de/grip", ref = "main"}
 
 [dev_dependencies]
 gleeunit = ">= 1.0.0 and < 2.0.0"

@@ -7,8 +7,8 @@ import gleam/option
 import gleam/result
 import gleam/string
 import gleam/uri
-import page
 import presentable_soup as soup
+import spoon/page
 
 pub fn log(
   page: page.Page,

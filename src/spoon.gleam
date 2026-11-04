@@ -1,37 +1,22 @@
+import gleam/erlang/process
 import gleam/http/request
 import gleam/http/response
 import gleam/httpc
-import gleam/list
-import gleam/otp/supervision
-import gleam/result
-import gleam/uri
-import internal/coordinator
-import middleware
-import page
-
-import gleam/erlang/process
 import gleam/otp/actor.{type StartResult}
 import gleam/otp/factory_supervisor as factory
 import gleam/otp/static_supervisor as supervisor
-import internal/fetcher
+import gleam/otp/supervision
+import gleam/result
+import gleam/uri
 
-pub type Page =
-  page.Page
+import spoon/internal/config
+import spoon/internal/coordinator
+import spoon/internal/fetcher
+import spoon/middleware
+import spoon/page
 
-pub type Next =
-  page.Candidates
-
-pub opaque type Config(item) {
-  Config(
-    base_url: uri.Uri,
-    start_urls: List(uri.Uri),
-    fetch: fn(uri.Uri) -> Result(response.Response(String), page.FetchError),
-    on_page: fn(page.Page) -> #(item, page.Candidates),
-    prefetch: fn(uri.Uri) -> Result(uri.Uri, page.FetchError),
-    next: fn(response.Response(String)) -> List(uri.Uri),
-    max_pages: Int,
-    max_concurrency: Int,
-  )
+pub opaque type Builder(item) {
+  Builder(config: config.Config(item))
 }
 
 /// Create a new crawl config
@@ -46,18 +31,18 @@ pub opaque type Config(item) {
 /// |> spoon.new()
 /// |> spoon.run()
 /// ```
-pub fn new(url url: String) -> Config(Nil) {
-  let assert Ok(uri) = uri.parse(url)
-  Config(
-    base_url: uri,
+pub fn new(url url: uri.Uri) -> Builder(Nil) {
+  Builder(config.Config(
+    base_url: url,
     start_urls: [],
     fetch: default_fetch,
-    on_page: default_on_page(uri, _),
+    on_page: default_on_page(url, _),
     prefetch: Ok,
     next: default_next,
     max_pages: 10,
     max_concurrency: 10,
-  )
+    user_agent: "spoon/1.0",
+  ))
 }
 
 /// Adds starting urls to the crawl list
@@ -68,9 +53,13 @@ pub fn new(url url: String) -> Config(Nil) {
 ///
 /// If no seed is given, the only starting url is the one given in
 /// `new`
-pub fn seed(config: Config(item), url: String) -> Config(item) {
-  let assert Ok(uri) = uri.parse(url)
-  Config(..config, start_urls: [uri, ..config.start_urls])
+pub fn seed(builder: Builder(item), url: uri.Uri) -> Builder(item) {
+  Builder(
+    config.Config(..builder.config, start_urls: [
+      url,
+      ..builder.config.start_urls
+    ]),
+  )
 }
 
 /// Callback when a new link was visited
@@ -85,18 +74,12 @@ pub fn seed(config: Config(item), url: String) -> Config(item) {
 /// - `middleware.resolve`
 /// - `middleware.protocol_http`
 pub fn on_page(
-  config: Config(a),
+  builder: Builder(a),
   on: fn(uri.Uri, page.Page) -> #(b, page.Candidates),
-) -> Config(b) {
-  Config(
-    base_url: config.base_url,
-    start_urls: config.start_urls,
-    fetch: config.fetch,
-    on_page: fn(page) { on(config.base_url, page) },
-    prefetch: config.prefetch,
-    next: config.next,
-    max_pages: config.max_pages,
-    max_concurrency: config.max_concurrency,
+) -> Builder(b) {
+  let base_url = builder.config.base_url
+  Builder(
+    config.Config(..builder.config, on_page: fn(page) { on(base_url, page) }),
   )
 }
 
@@ -105,10 +88,10 @@ pub fn on_page(
 /// Depending on the result the page will be visisted or
 /// not.
 pub fn prefetch(
-  config: Config(a),
+  builder: Builder(a),
   prefetch: fn(uri.Uri) -> Result(uri.Uri, page.FetchError),
-) -> Config(a) {
-  Config(..config, prefetch:)
+) -> Builder(a) {
+  Builder(config.Config(..builder.config, prefetch:))
 }
 
 /// Callback after a page got visited to get the next potential
@@ -117,26 +100,35 @@ pub fn prefetch(
 /// By default it will look for all html `<a>` tags and extract
 /// their `href` attributes.
 pub fn next(
-  config: Config(item),
+  builder: Builder(item),
   next: fn(response.Response(String)) -> List(uri.Uri),
-) -> Config(item) {
-  Config(..config, next: next)
+) -> Builder(item) {
+  Builder(config.Config(..builder.config, next:))
 }
 
 /// Sets the maximum number of pages after the crawl will be
 /// aborted
-pub fn max_pages(config: Config(item), max: Int) -> Config(item) {
-  Config(..config, max_pages: max)
+pub fn max_pages(builder: Builder(item), max_pages: Int) -> Builder(item) {
+  Builder(config.Config(..builder.config, max_pages:))
 }
 
 /// Sets the maximum number of in flight HTTP requests at a given time
-pub fn max_concurrency(config: Config(item), max: Int) -> Config(item) {
-  Config(..config, max_concurrency: max)
+pub fn max_concurrency(
+  builder: Builder(item),
+  max_concurrency: Int,
+) -> Builder(item) {
+  Builder(config.Config(..builder.config, max_concurrency:))
+}
+
+/// Sets the user agent for identifying HTTP requests and matching
+/// the `robots.txt` rules.
+pub fn user_agent(builder: Builder(item), user_agent: String) -> Builder(item) {
+  Builder(config.Config(..builder.config, user_agent:))
 }
 
 /// Just runs the crawl and call `on_page` for each page
-pub fn run(config: Config(Nil)) -> Nil {
-  fold(config, Nil, fn(_acc, _item) { Nil })
+pub fn run(builder: Builder(Nil)) -> Nil {
+  fold(builder, Nil, fn(_acc, _item) { Nil })
 }
 
 /// Same as `run` but can collect data from a crawl
@@ -144,7 +136,7 @@ pub fn run(config: Config(Nil)) -> Nil {
 /// Same as `list.fold` that it accepts an inital value
 /// and an accumulator.
 pub fn fold(
-  config: Config(item),
+  builder: Builder(item),
   initial: acc,
   combine: fn(acc, item) -> acc,
 ) -> acc {
@@ -155,7 +147,7 @@ pub fn fold(
     start_supervision_tree(
       fetchers_name,
       coordinator_name,
-      config,
+      builder.config,
       reply,
       initial,
       combine,
@@ -184,20 +176,21 @@ fn default_next(resp: response.Response(String)) -> List(uri.Uri) {
 }
 
 fn default_fetch(
-  url: uri.Uri,
+  request: request.Request(String),
 ) -> Result(response.Response(String), page.FetchError) {
-  use req <- result.try(
-    request.from_uri(url)
-    |> result.replace_error(page.FetchError),
-  )
-  let client = httpc.configure() |> httpc.follow_redirects(False)
-  httpc.dispatch(client, req) |> result.replace_error(page.FetchError)
+  // TODO: make the max size and redirect behaviour configurable by the user
+  httpc.configure()
+  |> httpc.follow_redirects(False)
+  |> httpc.timeout(5000)
+  |> httpc.max_body_size(httpc.Bytes(10 * 1024 * 1024))
+  |> httpc.dispatch(request)
+  |> result.replace_error(page.FetchError)
 }
 
 fn start_supervision_tree(
   fetchers_name: process.Name(_),
   coordinator_name: process.Name(_),
-  config: Config(item),
+  config: config.Config(item),
   reply: process.Subject(acc),
   initial: acc,
   combine: fn(acc, item) -> acc,
@@ -212,19 +205,11 @@ fn start_supervision_tree(
     supervision.worker(fn() {
       coordinator.start(
         coordinator_name,
-        coordinator.Options(
-          start_urls: [config.base_url, ..config.start_urls] |> list.unique(),
-          on_page: config.on_page,
-          prefetch: config.prefetch,
-          fetch: config.fetch,
-          next: config.next,
-          fetchers: fetchers_name,
-          max_pages: config.max_pages,
-          max_in_flight: config.max_concurrency,
-          initial:,
-          combine:,
-        ),
+        config,
+        initial,
+        combine,
         reply,
+        fetchers_name,
       )
     })
     |> supervision.restart(supervision.Transient),
