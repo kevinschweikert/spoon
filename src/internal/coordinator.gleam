@@ -161,17 +161,12 @@ fn capacity_reached(state: State(item, acc)) -> Bool {
 
 fn start_fetcher(state: State(item, acc), link: uri.Uri) -> State(item, acc) {
   let job =
-    fetcher.Job(
-      link:,
-      fetch: state.fetch,
-      next: state.next,
-      report: fn(report) {
-        case report {
-          Ok(page) -> process.send(state.self, Fetched(page))
-          Error(_) -> process.send(state.self, Errored)
-        }
-      },
-    )
+    fetcher.Job(link:, fetch: state.fetch, next: state.next, report: fn(report) {
+      case report {
+        Ok(page) -> process.send(state.self, Fetched(page))
+        Error(_) -> process.send(state.self, Errored)
+      }
+    })
   case
     factory_supervisor.start_child(
       factory_supervisor.get_by_name(state.fetchers),
