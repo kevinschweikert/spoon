@@ -1,63 +1,81 @@
-import gleam/bool
+import gleam/dict
 import gleam/erlang/process
 import gleam/http/request
-import gleam/list
-import gleam/option
 import gleam/otp/actor
 import gleam/otp/factory_supervisor
+import gleam/pair
 import gleam/result
-import gleam/set
 import gleam/uri
+import grip/origin
 import spoon/internal/config
+import spoon/internal/crawl
 import spoon/internal/fetcher
 import spoon/page
 
-pub type Crawl(item, acc) {
-  Crawl(
-    frontier: List(uri.Uri),
-    seen: set.Set(uri.Uri),
-    requests: Int,
-    name: process.Name(Message),
-    in_flight: Int,
-    self: process.Subject(Message),
-    fetchers: process.Name(fetcher.Factory),
+pub type Coordinator(item, acc) {
+  Coordinator(
+    self: process.Subject(Message(item)),
+    name: process.Name(Message(item)),
+    fetchers: process.Name(fetcher.Factory(item)),
     reply: process.Subject(acc),
+    crawl: crawl.Crawl,
+    workers: dict.Dict(process.Pid, origin.Origin),
+    config: config.Config(item),
     accumulator: acc,
     combine: fn(acc, item) -> acc,
-    config: config.Config(item),
   )
 }
 
-pub type Message {
-  Start
-  Visited(page.Page)
-  Errored
+pub type Message(item) {
+  Start(List(crawl.Effect))
+  Visited(
+    origin: origin.Origin,
+    answer: Result(#(item, page.Candidates), page.FetchError),
+  )
+  FailedToStart(origin: origin.Origin)
+  FetcherDown(process.Down)
+  Wake
 }
 
 pub fn start(
-  name: process.Name(Message),
+  name: process.Name(Message(item)),
   config: config.Config(item),
   initial: acc,
   combine: fn(acc, item) -> acc,
   reply: process.Subject(acc),
-  fetchers: process.Name(fetcher.Factory),
-) -> Result(actor.Started(process.Subject(Message)), actor.StartError) {
-  actor.new_with_initialiser(100, fn(self: process.Subject(Message)) {
-    process.send(self, Start)
-    Crawl(
+  fetchers: process.Name(fetcher.Factory(item)),
+) -> Result(actor.Started(process.Subject(Message(item))), actor.StartError) {
+  actor.new_with_initialiser(100, fn(self: process.Subject(Message(item))) {
+    let now = config.clock()
+    let selector =
+      process.new_selector()
+      |> process.select_monitors(FetcherDown)
+      |> process.select(self)
+
+    let crawl_settings =
+      crawl.Settings(
+        seeds: [config.base_url, ..config.start_urls],
+        delay_ms: config.delay_ms,
+        max_concurrency: config.max_concurrency,
+        max_pages: config.max_pages,
+        max_attempts: config.max_attempts,
+      )
+    let #(crawl, effects) = crawl.new(crawl_settings, now)
+
+    process.send(self, Start(effects))
+    Coordinator(
       name:,
-      frontier: [],
-      seen: set.new(),
-      requests: 0,
-      in_flight: 0,
       self:,
       fetchers:,
       reply:,
-      accumulator: initial,
+      crawl:,
+      workers: dict.new(),
       config:,
+      accumulator: initial,
       combine:,
     )
     |> actor.initialised()
+    |> actor.selecting(selector)
     |> actor.returning(self)
     |> Ok
   })
@@ -67,136 +85,129 @@ pub fn start(
 }
 
 fn handle_message(
-  crawl: Crawl(item, acc),
-  message: Message,
-) -> actor.Next(Crawl(item, acc), Message) {
+  coordinator: Coordinator(item, acc),
+  message: Message(item),
+) -> actor.Next(Coordinator(item, acc), Message(item)) {
+  let now = coordinator.config.clock()
   case message {
-    Start ->
-      crawl
-      |> enqueue([crawl.config.base_url, ..crawl.config.start_urls])
-      |> dispatch()
-      |> finish_or_continue()
+    Start(effects) -> execute(coordinator, effects, now)
 
-    Errored ->
-      Crawl(..crawl, in_flight: crawl.in_flight - 1)
-      |> dispatch()
-      |> finish_or_continue()
+    FetcherDown(process.ProcessDown(reason: process.Normal, pid:, ..)) -> {
+      Coordinator(..coordinator, workers: dict.delete(coordinator.workers, pid))
+      |> actor.continue()
+    }
+    FetcherDown(process.ProcessDown(pid:, ..)) -> {
+      case dict.get(coordinator.workers, pid) {
+        Ok(origin) -> {
+          let #(crawl, effects) =
+            crawl.update(coordinator.crawl, crawl.Crashed(origin), now)
+          Coordinator(
+            ..coordinator,
+            crawl:,
+            workers: dict.delete(coordinator.workers, pid),
+          )
+          |> execute(effects, now)
+        }
+        Error(_) -> {
+          let #(crawl, effects) =
+            crawl.update(coordinator.crawl, crawl.AfterWake, now)
+          Coordinator(..coordinator, crawl:)
+          |> execute(effects, now)
+        }
+      }
+    }
+    FailedToStart(origin:) -> {
+      let #(crawl, effects) =
+        crawl.update(coordinator.crawl, crawl.Crashed(origin), now)
+      Coordinator(..coordinator, crawl:)
+      |> execute(effects, now)
+    }
+    FetcherDown(_) -> {
+      let #(crawl, effects) =
+        crawl.update(coordinator.crawl, crawl.AfterWake, now)
+      Coordinator(..coordinator, crawl:)
+      |> execute(effects, now)
+    }
 
-    Visited(page) -> {
-      let crawl =
-        Crawl(
-          ..crawl,
-          in_flight: crawl.in_flight - 1,
-          requests: crawl.requests + 1,
+    Visited(origin:, answer:) -> {
+      let accumulator = case answer {
+        Ok(#(item, _)) -> coordinator.combine(coordinator.accumulator, item)
+        Error(_) -> coordinator.accumulator
+      }
+      let #(crawl, effects) =
+        crawl.update(
+          coordinator.crawl,
+          crawl.Fetched(origin, result.map(answer, pair.second)),
+          now,
         )
-      let #(item, page.Candidates(links)) = crawl.config.on_page(page)
-      crawl
-      |> combine(item)
-      |> enqueue(links)
-      |> dispatch()
-      |> finish_or_continue()
+      Coordinator(..coordinator, crawl:, accumulator:)
+      |> execute(effects, now)
+    }
+    Wake -> {
+      let #(crawl, effects) =
+        crawl.update(coordinator.crawl, crawl.AfterWake, now)
+      Coordinator(..coordinator, crawl:)
+      |> execute(effects, now)
     }
   }
 }
 
-fn combine(crawl: Crawl(item, acc), item: item) -> Crawl(item, acc) {
-  let accumulator = crawl.combine(crawl.accumulator, item)
-  Crawl(..crawl, accumulator:)
-}
-
-fn finish_or_continue(
-  crawl: Crawl(item, acc),
-) -> actor.Next(Crawl(item, acc), a) {
-  case crawl.in_flight {
-    0 -> {
-      process.send(crawl.reply, crawl.accumulator)
+fn execute(
+  coordinator: Coordinator(item, acc),
+  effects: List(crawl.Effect),
+  now: Int,
+) -> actor.Next(Coordinator(item, acc), a) {
+  case effects {
+    [] -> actor.continue(coordinator)
+    [crawl.Done, ..] -> {
+      process.send(coordinator.reply, coordinator.accumulator)
       actor.stop()
     }
-    _ -> actor.continue(crawl)
-  }
-}
-
-fn dispatch(crawl: Crawl(item, acc)) -> Crawl(item, acc) {
-  use <- bool.guard(when: capacity_reached(crawl), return: crawl)
-
-  case crawl.frontier {
-    [] -> crawl
-    [link, ..frontier] -> {
-      let crawl = Crawl(..crawl, frontier:)
-      let crawl = case crawl.config.prefetch(link) {
-        Ok(link) ->
-          case build_request(crawl.config, link) {
-            Ok(request) -> start_fetcher(crawl, request)
-            Error(_) -> crawl
-          }
-        Error(_) -> crawl
+    [crawl.Wake(at:), ..rest] -> {
+      process.send_after(coordinator.self, at - now, Wake)
+      execute(coordinator, rest, now)
+    }
+    [crawl.Fetch(scoop), ..rest] -> {
+      let visit =
+        fetcher.Visit(
+          scoop:,
+          build_request: build_request(_, coordinator.config.user_agent),
+          fetch: coordinator.config.fetch,
+          next: coordinator.config.next,
+          on_page: coordinator.config.on_page,
+          report: fn(result) {
+            process.send(coordinator.self, Visited(scoop.origin, result))
+          },
+        )
+      case
+        factory_supervisor.start_child(
+          factory_supervisor.get_by_name(coordinator.fetchers),
+          visit,
+        )
+      {
+        Ok(fetcher) -> {
+          process.monitor(fetcher.pid)
+          let workers =
+            dict.insert(coordinator.workers, fetcher.pid, scoop.origin)
+          Coordinator(..coordinator, workers:)
+          |> execute(rest, now)
+        }
+        Error(_) -> {
+          process.send(coordinator.self, FailedToStart(scoop.origin))
+          execute(coordinator, rest, now)
+        }
       }
-      dispatch(crawl)
     }
   }
 }
 
 fn build_request(
-  config: config.Config(item),
-  link: uri.Uri,
-) -> Result(request.Request(String), Nil) {
-  use request <- result.try(request.from_uri(link))
-  Ok(request.set_header(request, "user-agent", config.user_agent))
-}
-
-fn capacity_reached(crawl: Crawl(item, acc)) -> Bool {
-  crawl.in_flight >= crawl.config.max_concurrency
-  || crawl.requests + crawl.in_flight >= crawl.config.max_pages
-}
-
-fn start_fetcher(
-  crawl: Crawl(item, acc),
-  request: request.Request(String),
-) -> Crawl(item, acc) {
-  let visit =
-    fetcher.Visit(
-      request:,
-      fetch: crawl.config.fetch,
-      next: crawl.config.next,
-      report: fn(report) {
-        case report {
-          Ok(page) -> process.send(crawl.self, Visited(page))
-          Error(_) -> process.send(crawl.self, Errored)
-        }
-      },
-    )
-  case
-    factory_supervisor.start_child(
-      factory_supervisor.get_by_name(crawl.fetchers),
-      visit,
-    )
-  {
-    Ok(_) -> Crawl(..crawl, in_flight: crawl.in_flight + 1)
-    Error(_) -> crawl
-  }
-}
-
-fn enqueue(crawl: Crawl(item, acc), links: List(uri.Uri)) -> Crawl(item, acc) {
-  links
-  |> list.map(normalize)
-  |> list.fold(crawl, fn(crawl, link) {
-    case set.contains(crawl.seen, link) {
-      True -> crawl
-      False ->
-        Crawl(
-          ..crawl,
-          frontier: list.append(crawl.frontier, [link]),
-          seen: set.insert(crawl.seen, link),
-        )
-    }
-  })
-}
-
-fn normalize(url: uri.Uri) -> uri.Uri {
-  let path = case url.path {
-    "" -> "/"
-    path -> path
-  }
-
-  uri.Uri(..url, path:, fragment: option.None)
+  url: uri.Uri,
+  user_agent: String,
+) -> Result(request.Request(String), page.FetchError) {
+  use request <- result.try(
+    request.from_uri(url)
+    |> result.replace_error(page.InvalidUrl(url)),
+  )
+  Ok(request.set_header(request, "user-agent", user_agent))
 }

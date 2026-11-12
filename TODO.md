@@ -9,15 +9,13 @@ Robots policies, rate limits, and backoff are all scoped per origin (scheme + ho
 ### 1a. Groundwork
 
 - [x] Configurable `User-Agent` (`spoon.user_agent`), sent on every fetch and passed to `grip.rate`/`grip.is_allowed` in 1d.
-- [ ] Injectable clock: `clock: fn() -> Int` on internal `config.Config`, default monotonic ms via FFI (can be negative, only differences matter). No public setter — tests build `config.Config` directly; the 1d robots cache reads the same clock for expiry.
-- [ ] Sample `now` once per message and pass it down as `Int`. `send_after` wake-ups are hints, never authority: every dispatch re-checks `now`, so stale wakes are harmless and tests step the clock instead of waiting on timers. Naming convention: absolute instants end in `_at` (`next_at`, `Wake(at:)`), durations in `_ms` (`delay_ms`), the parameter is always `now`.
 
-Checkpoint: the crawler identifies itself, and tests can step time instead of sleeping.
+Checkpoint: the crawler identifies itself.
 
 ### 1b. Crash safety on the current coordinator
 
-- [ ] Fetchers become `Temporary` children; the coordinator runs `process.monitor` on each pid after `factory.start_child`.
-- [ ] `WorkerDown(process.Down)` message, handled like `Errored` until 1c adds requeueing.
+- [x] Fetchers become `Temporary` children; the coordinator runs `process.monitor` on each pid after `factory.start_child`.
+- [x] `WorkerDown(process.Down)` message, handled like `Errored` until 1c adds requeueing.
 
 Checkpoint: a crash in user handler code kills one fetch, not the crawl, and frees the slot.
 
@@ -25,12 +23,13 @@ Checkpoint: a crash in user handler code kills one fetch, not the crawl, and fre
 
 Functional core, imperative shell — it's the Elm architecture (as in Lustre), so we keep its naming: `update(crawl, msg, now) -> #(Crawl, List(Effect))` in `spoon/internal/crawl`, `Effect = Fetch(Scoop) | Wake(at: Int) | Done(acc)` (data only, never callbacks). The coordinator stays as the shell: a one-pass interpreter (`factory.start_child`, `send_after`, reply). The frontier is a pure data structure in `spoon/internal/frontier`. Tests drive the core like a [captured continuation](https://crowdhailer.me/2026-07-30/a-universal-approach-to-mocking/): feed messages with literal `now` ints, assert full effect lists (order _and_ absence), interleave `Visited`/`WorkerDown` to cover concurrency — no fakes in core tests; stepped clock + recording `fetch` survive only as integration smoke over the shell. No test-only frontier dump; `spoon.stats` (section 2) if introspection is ever needed.
 
-- [ ] Two-level frontier: `slots: Dict(Origin, Slot)` + `ready: PriorityQueue(#(Int, Origin))` keyed by `next_at`. `Slot` (per origin, Scrapy-style) holds `policy`, `delay_ms`, `scoops: Deque(Scoop)`, `next_at`, `in_flight: Option(Scoop)`, `failures`. API: `push`; `pop(frontier, now) -> Popped` with `Popped(Scoop, Frontier) | Cooling(until: Int) | Empty` — a real outcome type, not `Option`: `Cooling` tells the shell when to `Wake`, `Empty` feeds the finish check; `settle(frontier, origin, outcome, now)` with `Outcome = Success | Failure | Throttled(retry_after_ms: Option(Int))`; `requeue`. Invariant: an origin is in `ready` only with scoops and nothing in flight; stale entries skipped on pop. Until 1d: `policy = grip.allow_all()`, `delay_ms` from `spoon.rate_limit(config, Delay)`.
+- [x] Injectable clock: `clock: fn() -> Int` on internal `config.Config`, default monotonic ms via FFI (can be negative, only differences matter). No public setter — tests build `config.Config` directly; the 1d robots cache reads the same clock for expiry.
+- [ ] Two-level frontier: `slots: Dict(Origin, Slot)` + `ready: PriorityQueue(#(Int, Origin))` keyed by `next_at`. `Slot` (per origin, Scrapy-style) holds `policy`, `delay_ms`, `scoops: Deque(Scoop)`, `next_at`, `in_flight: Option(Scoop)`, `failures`. API: `push`; `pop(frontier, now) -> Popped` with `Popped(Scoop, Frontier) | Cooling(until: Int) | Empty` — a real outcome type, not `Option`: `Cooling` tells the shell when to `Wake`, `Empty` feeds the finish check; `settle(frontier, origin, now)` for success; `penalize(frontier, origin, now, retry_after: Option(Int))` for failure and 429/503; `requeue`. Invariant: an origin is in `ready` only with scoops and nothing in flight; stale entries skipped on pop. Until 1d: `policy = grip.allow_all()`, `delay_ms` from `spoon.rate_limit(config, Delay)`.
 - [ ] `Scoop(url, depth, attempts)`. `attempts` gives up on one URL (e.g. 3); the host's `failures` drives origin backoff (1e) and resets on success.
-- [ ] One request in flight per origin; `next_at = now + delay` set on completion, so slow servers get crawled slower.
+- [x] One request in flight per origin; `next_at = now + delay` set on completion, so slow servers get crawled slower.
 - [ ] No busy-looping: `process.send_after` a wake-up for the earliest `next_at`.
 - [ ] Link loop: scope pipeline from section 3, then enqueue on the origin's deque.
-- [ ] `WorkerDown`: `requeue` — free the origin, `in_flight` scoop back at the front with `attempts + 1`.
+- [ ] `WorkerDown`: crawl owns the attempt cap. Under `max_attempts`: `requeue` — free the origin, `in_flight` scoop back at the front with `attempts + 1`. At the cap: `penalize`, scoop dropped.
 
 Checkpoint: two origins crawl in parallel, a slow one doesn't block the other, and the default delay spaces requests per origin.
 

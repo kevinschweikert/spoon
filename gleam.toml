@@ -16,6 +16,7 @@ gleam_erlang = ">= 1.3.0 and < 2.0.0"
 gleam_stdlib = {git = "https://github.com/gleam-lang/stdlib", ref = "main"}
 # use hex managed when 1.0.0 is released
 grip = {git = "https://tangled.org/kevinschweikert.de/grip", ref = "main"}
+gleam_deque = ">= 1.0.0 and < 2.0.0"
 
 [dev_dependencies]
 gleeunit = ">= 1.0.0 and < 2.0.0"

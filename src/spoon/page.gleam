@@ -11,4 +11,5 @@ pub type Candidates {
 pub type FetchError {
   PrefetchRefused
   FetchError
+  InvalidUrl(uri.Uri)
 }

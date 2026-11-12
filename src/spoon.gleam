@@ -2,12 +2,14 @@ import gleam/erlang/process
 import gleam/http/request
 import gleam/http/response
 import gleam/httpc
+import gleam/list
 import gleam/otp/actor.{type StartResult}
 import gleam/otp/factory_supervisor as factory
 import gleam/otp/static_supervisor as supervisor
 import gleam/otp/supervision
 import gleam/result
 import gleam/uri
+import grip/origin
 
 import spoon/internal/config
 import spoon/internal/coordinator
@@ -18,6 +20,9 @@ import spoon/page
 pub opaque type Builder(item) {
   Builder(config: config.Config(item))
 }
+
+@external(erlang, "spoon_ffi", "monotonic_time")
+fn monotonic_time() -> Int
 
 /// Create a new crawl config
 ///
@@ -42,6 +47,9 @@ pub fn new(url url: uri.Uri) -> Builder(Nil) {
     max_pages: 10,
     max_concurrency: 10,
     user_agent: "spoon/1.0",
+    clock: monotonic_time,
+    delay_ms: 1000,
+    max_attempts: 3,
   ))
 }
 
@@ -120,6 +128,21 @@ pub fn max_concurrency(
   Builder(config.Config(..builder.config, max_concurrency:))
 }
 
+/// Sets the minimum delay in milliseconds between two requests to
+/// the same origin
+pub fn rate_limit(builder: Builder(item), delay_ms: Int) -> Builder(item) {
+  Builder(config.Config(..builder.config, delay_ms:))
+}
+
+/// Sets how often a URL is retried after an unsuccesful fetch before
+/// it gets dropped
+pub fn max_attempts(
+  builder: Builder(item),
+  max_attempts: Int,
+) -> Builder(item) {
+  Builder(config.Config(..builder.config, max_attempts:))
+}
+
 /// Sets the user agent for identifying HTTP requests and matching
 /// the `robots.txt` rules.
 pub fn user_agent(builder: Builder(item), user_agent: String) -> Builder(item) {
@@ -140,6 +163,10 @@ pub fn fold(
   initial: acc,
   combine: fn(acc, item) -> acc,
 ) -> acc {
+  list.each([builder.config.base_url, ..builder.config.start_urls], fn(seed) {
+    let assert Ok(_) = origin.from_uri(seed)
+      as "seeds need an http(s) scheme and a host"
+  })
   let coordinator_name = process.new_name("coordinator")
   let fetchers_name = process.new_name("fetchers")
   let reply = process.new_subject()
@@ -198,6 +225,7 @@ fn start_supervision_tree(
   let fetchers_supervisor =
     factory.worker_child(fetcher.start)
     |> factory.named(fetchers_name)
+    |> factory.restart_strategy(supervision.Temporary)
     |> factory.supervised()
 
   supervisor.new(supervisor.RestForOne)

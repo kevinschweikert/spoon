@@ -15,5 +15,8 @@ pub type Config(item) {
     max_pages: Int,
     max_concurrency: Int,
     user_agent: String,
+    clock: fn() -> Int,
+    delay_ms: Int,
+    max_attempts: Int,
   )
 }

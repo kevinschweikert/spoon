@@ -3,19 +3,24 @@ import gleam/http/request
 import gleam/http/response
 import gleam/otp/actor
 import gleam/otp/factory_supervisor
+import gleam/result
 import gleam/uri
+import spoon/internal/frontier
 import spoon/page
 
-pub type Factory =
-  factory_supervisor.Message(Visit, process.Subject(Message))
+pub type Factory(item) =
+  factory_supervisor.Message(Visit(item), process.Subject(Message))
 
-pub type Visit {
+pub type Visit(item) {
   Visit(
-    request: request.Request(String),
+    scoop: frontier.Scoop,
+    build_request: fn(uri.Uri) ->
+      Result(request.Request(String), page.FetchError),
     fetch: fn(request.Request(String)) ->
       Result(response.Response(String), page.FetchError),
     next: fn(response.Response(String)) -> List(uri.Uri),
-    report: fn(Result(page.Page, page.FetchError)) -> Nil,
+    on_page: fn(page.Page) -> #(item, page.Candidates),
+    report: fn(Result(#(item, page.Candidates), page.FetchError)) -> Nil,
   )
 }
 
@@ -24,7 +29,7 @@ pub opaque type Message {
 }
 
 pub fn start(
-  visit: Visit,
+  visit: Visit(item),
 ) -> Result(actor.Started(process.Subject(Message)), actor.StartError) {
   actor.new_with_initialiser(100, fn(self) {
     process.send(self, Fetch)
@@ -38,28 +43,23 @@ pub fn start(
 }
 
 fn handle_message(
-  visit: Visit,
+  visit: Visit(item),
   message: Message,
-) -> actor.Next(Visit, Message) {
-  case message {
+) -> actor.Next(Visit(item), Message) {
+  let answer = case message {
     Fetch -> {
-      case visit.fetch(visit.request) {
-        Ok(resp) -> {
-          page.Page(
-            url: visit.request |> request.to_uri(),
-            status: resp.status,
-            body: resp.body,
-            candidates: visit.next(resp),
-          )
-          |> Ok()
-          |> visit.report()
-          actor.stop()
-        }
-        Error(_) -> {
-          visit.report(Error(page.FetchError))
-          actor.stop()
-        }
-      }
+      use request <- result.try(visit.build_request(visit.scoop.url))
+      use response <- result.try(visit.fetch(request))
+      page.Page(
+        url: visit.scoop.url,
+        status: response.status,
+        body: response.body,
+        candidates: visit.next(response),
+      )
+      |> visit.on_page()
+      |> Ok
     }
   }
+  visit.report(answer)
+  actor.stop()
 }
