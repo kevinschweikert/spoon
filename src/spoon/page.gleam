@@ -1,3 +1,4 @@
+import gleam/option
 import gleam/uri
 
 pub type Page {
@@ -6,6 +7,11 @@ pub type Page {
 
 pub type Outcome(item) {
   Outcome(item: item, candidates: List(uri.Uri))
+}
+
+pub type Report(item) {
+  Fetched(outcome: Outcome(item), crawl_delay_ms: option.Option(Int))
+  Skipped
 }
 
 pub type FetchError {

@@ -5,7 +5,6 @@ import gleam/set
 import gleam/uri
 import grip/origin.{type Origin}
 import spoon/internal/frontier
-import spoon/page
 
 pub type Settings {
   Settings(
@@ -27,7 +26,13 @@ pub type Crawl {
 }
 
 pub type Message {
-  Fetched(origin: Origin, result: Result(List(uri.Uri), page.FetchError))
+  Fetched(
+    origin: Origin,
+    crawl_delay_ms: option.Option(Int),
+    links: List(uri.Uri),
+  )
+  Failed(origin: Origin)
+  Skipped(origin: Origin)
   Crashed(origin: Origin)
   AfterWake
 }
@@ -49,20 +54,20 @@ pub fn new(settings: Settings, now: Int) -> #(Crawl, List(Effect)) {
 
 pub fn update(crawl: Crawl, msg: Message, now: Int) -> #(Crawl, List(Effect)) {
   case msg {
-    Fetched(origin:, result:) ->
+    Fetched(origin:, crawl_delay_ms:, links:) ->
       case frontier.in_flight_for(crawl.frontier, origin) {
         option.None -> #(crawl, [])
         option.Some(_) -> {
-          let crawl = crawl |> settle(origin, now) |> increment_request()
-          case result {
-            Ok(candidates) ->
-              crawl
-              |> push_links(candidates, now)
-              |> next(now)
-            Error(_) -> next(crawl, now)
-          }
+          let crawl =
+            crawl |> settle(origin, crawl_delay_ms, now) |> increment_request()
+          crawl
+          |> push_links(links, now)
+          |> next(now)
         }
       }
+    Failed(origin:) -> crawl |> settle(origin, option.None, now) |> next(now)
+    Skipped(origin:) ->
+      crawl |> settle(origin, option.Some(0), now) |> next(now)
     Crashed(origin:) ->
       case frontier.in_flight_for(crawl.frontier, origin) {
         option.Some(scoop) if scoop.attempts + 1 < crawl.settings.max_attempts -> {
@@ -93,7 +98,6 @@ fn push_links(crawl: Crawl, links: List(uri.Uri), now: Int) -> Crawl {
           frontier: frontier.push(
             crawl.frontier,
             frontier.new_scoop(site, url),
-            crawl.settings.delay_ms,
             now,
           ),
         )
@@ -102,18 +106,45 @@ fn push_links(crawl: Crawl, links: List(uri.Uri), now: Int) -> Crawl {
   })
 }
 
-fn settle(crawl: Crawl, origin: Origin, now: Int) {
-  Crawl(..crawl, frontier: crawl.frontier |> frontier.settle(origin, now))
+fn settle(
+  crawl: Crawl,
+  origin: Origin,
+  delay_ms: option.Option(Int),
+  now: Int,
+) {
+  Crawl(
+    ..crawl,
+    frontier: crawl.frontier
+      |> frontier.settle(
+        origin,
+        option.unwrap(delay_ms, crawl.settings.delay_ms),
+        now,
+      ),
+  )
 }
 
 fn requeue(crawl: Crawl, origin: Origin, now: Int) {
-  Crawl(..crawl, frontier: frontier.requeue(crawl.frontier, origin, now))
+  Crawl(
+    ..crawl,
+    frontier: frontier.requeue(
+      crawl.frontier,
+      origin,
+      crawl.settings.delay_ms,
+      now,
+    ),
+  )
 }
 
 fn penalize(crawl: Crawl, origin: Origin, now: Int) -> Crawl {
   Crawl(
     ..crawl,
-    frontier: frontier.penalize(crawl.frontier, origin, now, option.None),
+    frontier: frontier.penalize(
+      crawl.frontier,
+      origin,
+      crawl.settings.delay_ms,
+      now,
+      option.None,
+    ),
   )
 }
 

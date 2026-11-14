@@ -1,10 +1,10 @@
 import gleam/list
+import gleam/option
 import gleam/string
 import gleam/uri
 import grip/origin
 import spoon/internal/crawl
 import spoon/internal/frontier
-import spoon/page
 
 const delay = 1000
 
@@ -45,22 +45,26 @@ fn settings_with(seeds: List(String)) -> crawl.Settings {
   )
 }
 
-fn succeeded(text: String, links: List(String)) -> crawl.Message {
-  let candidates = list.map(links, url)
-  crawl.Fetched(origin_of(text), Ok(candidates))
+fn succeeded(
+  text: String,
+  links: List(String),
+  crawl_delay_ms: option.Option(Int),
+) -> crawl.Message {
+  crawl.Fetched(origin_of(text), crawl_delay_ms, list.map(links, url))
 }
 
 fn failed(text: String) -> crawl.Message {
-  crawl.Fetched(origin_of(text), Error(page.FetchError))
+  crawl.Failed(origin_of(text))
+}
+
+fn skipped(text: String) -> crawl.Message {
+  crawl.Skipped(origin_of(text))
 }
 
 pub fn start_fetches_each_origin_once_test() {
   let #(_, effects) =
     crawl.new(
-      settings_with([
-        "https://a.example/",
-        "https://b.example/",
-      ]),
+      settings_with(["https://a.example/", "https://b.example/"]),
       0,
     )
   let urls = fetched_urls(effects) |> list.sort(string.compare)
@@ -103,12 +107,13 @@ pub fn max_pages_zero_finishes_without_fetching_test() {
 }
 
 pub fn a_lone_page_finishes_the_crawl_test() {
-  let #(state, _) = crawl.new(settings_with(["https://a.example/"]), 0)
-  let #(_, effects) =
+  let #(state, started) = crawl.new(settings_with(["https://a.example/"]), 0)
+  let #(_, finished) =
     state
-    |> crawl.update(succeeded("https://a.example/", []), 100)
+    |> crawl.update(succeeded("https://a.example/", [], option.None), 100)
 
-  assert effects == [crawl.Done]
+  assert started == [fetch("https://a.example/")]
+  assert finished == [crawl.Done]
 }
 
 pub fn links_on_other_origins_are_fetched_while_this_one_cools_test() {
@@ -116,11 +121,14 @@ pub fn links_on_other_origins_are_fetched_while_this_one_cools_test() {
   let links = ["https://b.example/1", "https://a.example/2"]
   let #(_, effects) =
     state
-    |> crawl.update(succeeded("https://a.example/", links), 100)
+    |> crawl.update(
+      succeeded("https://a.example/", links, option.None),
+      100,
+    )
 
   assert list.length(effects) == 2
   assert fetched_urls(effects) == ["https://b.example/1"]
-  assert list.contains(effects, crawl.Wake(at: 1100))
+  assert list.contains(effects, crawl.Wake(at: 100 + delay))
 }
 
 pub fn a_link_already_seen_is_not_fetched_again_test() {
@@ -128,7 +136,7 @@ pub fn a_link_already_seen_is_not_fetched_again_test() {
   let #(_, effects) =
     state
     |> crawl.update(
-      succeeded("https://a.example/", ["https://a.example/"]),
+      succeeded("https://a.example/", ["https://a.example/"], option.None),
       100,
     )
 
@@ -149,7 +157,7 @@ pub fn a_failed_fetch_still_cools_the_origin_test() {
     |> crawl.update(crawl.AfterWake, 1100)
   let #(_, finished) =
     state
-    |> crawl.update(succeeded("https://a.example/second", []), 1200)
+    |> crawl.update(succeeded("https://a.example/second", [], option.None), 1200)
 
   assert started == [fetch("https://a.example/")]
   assert failed_effects == [crawl.Wake(at: 1100)]
@@ -157,7 +165,23 @@ pub fn a_failed_fetch_still_cools_the_origin_test() {
   assert finished == [crawl.Done]
 }
 
-pub fn the_cooldown_comes_from_the_settings_test() {
+pub fn a_reported_crawl_delay_sets_the_cooldown_test() {
+  let #(state, _) =
+    crawl.new(
+      settings_with(["https://a.example/", "https://a.example/second"]),
+      0,
+    )
+  let #(_, effects) =
+    state
+    |> crawl.update(
+      succeeded("https://a.example/", [], option.Some(3000)),
+      100,
+    )
+
+  assert effects == [crawl.Wake(at: 3100)]
+}
+
+pub fn the_settings_delay_applies_without_a_crawl_delay_test() {
   let settings =
     crawl.Settings(
       ..settings_with(["https://a.example/", "https://a.example/second"]),
@@ -166,9 +190,64 @@ pub fn the_cooldown_comes_from_the_settings_test() {
   let #(state, _) = crawl.new(settings, 0)
   let #(_, effects) =
     state
-    |> crawl.update(succeeded("https://a.example/", []), 100)
+    |> crawl.update(succeeded("https://a.example/", [], option.None), 100)
 
   assert effects == [crawl.Wake(at: 350)]
+}
+
+pub fn a_skipped_page_releases_its_origin_without_a_cooldown_test() {
+  let #(state, started) =
+    crawl.new(
+      settings_with([
+        "https://a.example/private/x",
+        "https://a.example/public/y",
+      ]),
+      0,
+    )
+  let #(_, effects) =
+    state
+    |> crawl.update(skipped("https://a.example/private/x"), 100)
+
+  assert started == [fetch("https://a.example/private/x")]
+  assert effects == [fetch("https://a.example/public/y")]
+}
+
+pub fn a_skipped_page_is_not_counted_as_a_request_test() {
+  let settings =
+    crawl.Settings(
+      ..settings_with([
+        "https://a.example/private/x",
+        "https://a.example/public/y",
+      ]),
+      max_pages: 1,
+    )
+  let #(state, _) = crawl.new(settings, 0)
+  let #(_, effects) =
+    state
+    |> crawl.update(skipped("https://a.example/private/x"), 100)
+
+  assert effects == [fetch("https://a.example/public/y")]
+}
+
+pub fn a_skip_on_one_origin_does_not_block_another_test() {
+  let #(state, started) =
+    crawl.new(
+      settings_with([
+        "https://a.example/private/x",
+        "https://b.example/private/x",
+      ]),
+      0,
+    )
+  let #(state, after_skip) =
+    state
+    |> crawl.update(skipped("https://a.example/private/x"), 0)
+  let #(_, finished) =
+    state
+    |> crawl.update(succeeded("https://b.example/private/x", [], option.None), 0)
+
+  assert list.length(started) == 2
+  assert after_skip == []
+  assert finished == [crawl.Done]
 }
 
 pub fn done_waits_until_every_in_flight_fetch_has_reported_test() {
@@ -176,10 +255,10 @@ pub fn done_waits_until_every_in_flight_fetch_has_reported_test() {
     crawl.new(settings_with(["https://a.example/", "https://b.example/"]), 0)
   let #(state, waiting) =
     state
-    |> crawl.update(succeeded("https://a.example/", []), 100)
+    |> crawl.update(succeeded("https://a.example/", [], option.None), 100)
   let #(_, finished) =
     state
-    |> crawl.update(succeeded("https://b.example/", []), 100)
+    |> crawl.update(succeeded("https://b.example/", [], option.None), 100)
 
   assert waiting == []
   assert finished == [crawl.Done]
@@ -190,9 +269,18 @@ pub fn a_fetched_for_an_idle_origin_is_ignored_test() {
   let #(_, effects) =
     state
     |> crawl.update(
-      succeeded("https://c.example/", ["https://b.example/"]),
+      succeeded("https://c.example/", ["https://b.example/"], option.None),
       100,
     )
+
+  assert effects == []
+}
+
+pub fn a_skipped_for_an_idle_origin_is_ignored_test() {
+  let #(state, _) = crawl.new(settings_with(["https://a.example/"]), 0)
+  let #(_, effects) =
+    state
+    |> crawl.update(skipped("https://c.example/"), 100)
 
   assert effects == []
 }
@@ -203,7 +291,7 @@ pub fn a_crash_report_after_a_clean_exit_changes_nothing_test() {
     crawl.new(settings_with(["https://a.example/", "https://b.example/"]), 0)
   let #(state, reported) =
     state
-    |> crawl.update(succeeded("https://a.example/", []), 100)
+    |> crawl.update(succeeded("https://a.example/", [], option.None), 100)
   let #(_, down) =
     state
     |> crawl.update(crawl.Crashed(a_origin), 100)
@@ -235,7 +323,7 @@ pub fn an_early_wake_repeats_the_wake_without_fetching_test() {
     )
   let #(state, cooling) =
     state
-    |> crawl.update(succeeded("https://a.example/", []), 100)
+    |> crawl.update(succeeded("https://a.example/", [], option.None), 100)
   let #(_, early) =
     state
     |> crawl.update(crawl.AfterWake, 500)
@@ -258,10 +346,10 @@ pub fn max_pages_stops_dispatch_and_finishes_when_in_flight_drains_test() {
   let assert [first_url, second_url] = fetched_urls(started)
   let #(state, after_first) =
     state
-    |> crawl.update(succeeded(first_url, []), 100)
+    |> crawl.update(succeeded(first_url, [], option.None), 100)
   let #(_, finished) =
     state
-    |> crawl.update(succeeded(second_url, []), 100)
+    |> crawl.update(succeeded(second_url, [], option.None), 100)
 
   assert after_first == []
   assert finished == [crawl.Done]

@@ -1,6 +1,7 @@
 import gleam/erlang/process
 import gleam/http/request
 import gleam/http/response
+import gleam/option
 import gleam/otp/actor
 import gleam/otp/factory_supervisor
 import gleam/result
@@ -20,7 +21,7 @@ pub type Visit(item) {
       Result(response.Response(String), page.FetchError),
     next: fn(response.Response(String)) -> List(uri.Uri),
     on_page: fn(page.Page) -> page.Outcome(item),
-    report: fn(Result(page.Outcome(item), page.FetchError)) -> Nil,
+    report: fn(Result(page.Report(item), page.FetchError)) -> Nil,
   )
 }
 
@@ -50,14 +51,16 @@ fn handle_message(
     Fetch -> {
       use request <- result.try(visit.build_request(visit.scoop.url))
       use response <- result.try(visit.fetch(request))
-      page.Page(
-        url: visit.scoop.url,
-        status: response.status,
-        body: response.body,
-        candidates: visit.next(response),
-      )
-      |> visit.on_page()
-      |> Ok
+      let outcome =
+        page.Page(
+          url: visit.scoop.url,
+          status: response.status,
+          body: response.body,
+          candidates: visit.next(response),
+        )
+        |> visit.on_page()
+
+      Ok(page.Fetched(outcome:, crawl_delay_ms: option.None))
     }
   }
   visit.report(answer)

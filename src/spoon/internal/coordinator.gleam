@@ -31,9 +31,9 @@ pub type Coordinator(item, acc) {
 
 pub type Message(item) {
   Start(List(crawl.Effect))
-  Visited(
+  Reported(
     scoop: frontier.Scoop,
-    outcome: Result(page.Outcome(item), page.FetchError),
+    report: Result(page.Report(item), page.FetchError),
   )
   FailedToStart(origin: origin.Origin)
   FetcherDown(process.Down)
@@ -132,31 +132,54 @@ fn handle_message(
       |> execute(effects, now)
     }
 
-    Visited(scoop:, outcome:) -> {
-      let accumulator =
-        result.map(outcome, fn(outcome) {
-          coordinator.combine(coordinator.accumulator, outcome.item)
-        })
-        |> result.unwrap(coordinator.accumulator)
+    Reported(scoop:, report:) -> {
+      case report {
+        Ok(report) ->
+          case report {
+            page.Fetched(outcome:, crawl_delay_ms:) -> {
+              let accumulator =
+                coordinator.combine(coordinator.accumulator, outcome.item)
+              let outcome =
+                outcome
+                |> resolve_candidates(scoop)
+                |> keep_requestable
+                |> filter_by_prefetch(coordinator.config.prefetch)
+                |> filter_by_scope(coordinator.config.scope)
 
-      let outcome =
-        outcome
-        |> result.map(resolve_candidates(_, scoop))
-        |> result.map(keep_requestable)
-        |> result.map(filter_by_prefetch)
-        |> result.map(filter_by_scope(_, coordinator.config.scope))
-
-      let #(crawl, effects) =
-        crawl.update(
-          coordinator.crawl,
-          crawl.Fetched(
-            scoop.origin,
-            result.map(outcome, fn(outcome) { outcome.candidates }),
-          ),
-          now,
-        )
-      Coordinator(..coordinator, crawl:, accumulator:)
-      |> execute(effects, now)
+              let #(crawl, effects) =
+                crawl.update(
+                  coordinator.crawl,
+                  crawl.Fetched(
+                    origin: scoop.origin,
+                    crawl_delay_ms: option.or(
+                      crawl_delay_ms,
+                      option.Some(coordinator.config.delay_ms),
+                    ),
+                    links: outcome.candidates,
+                  ),
+                  now,
+                )
+              Coordinator(..coordinator, crawl:, accumulator:)
+              |> execute(effects, now)
+            }
+            page.Skipped -> {
+              let #(crawl, effects) =
+                crawl.update(
+                  coordinator.crawl,
+                  crawl.Skipped(scoop.origin),
+                  now,
+                )
+              Coordinator(..coordinator, crawl:)
+              |> execute(effects, now)
+            }
+          }
+        Error(_) -> {
+          let #(crawl, effects) =
+            crawl.update(coordinator.crawl, crawl.Failed(scoop.origin), now)
+          Coordinator(..coordinator, crawl:)
+          |> execute(effects, now)
+        }
+      }
     }
     Wake -> {
       let #(crawl, effects) =
@@ -191,7 +214,7 @@ fn execute(
           next: coordinator.config.next,
           on_page: coordinator.config.on_page,
           report: fn(result) {
-            process.send(coordinator.self, Visited(scoop, result))
+            process.send(coordinator.self, Reported(scoop, result))
           },
         )
       case

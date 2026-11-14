@@ -33,18 +33,42 @@ Checkpoint: two origins crawl in parallel, a slow one doesn't block the other, a
 
 ### 1d. Robots (grip)
 
-- [ ] Robots cache actor: policy per `Origin`, parks callers on a miss, fetches via the factory, expires after ~24h. No crawling logic. Robots fetch derived from `make_fetch` with a ~500 KiB cap (RFC 9309) — the user's transport (proxy, test stub) covers robots.txt too.
-- [ ] `Slot` (per origin) holds `policy` next to `delay_ms`. Until this lands: `policy = grip.allow_all()`, `delay_ms` from `spoon.rate_limit`.
-- [ ] Per-origin delay from `grip.rate`, converted to ms once, falling back to the default.
-- [ ] `origin.covers` on every link; uncovered links trigger a lookup for their own origin.
-- [ ] `spoon.respect_robots(config, Bool)`, default `True`.
-- [ ] Supervise `rest_for_one`: factory, robots cache, coordinator. A cache crash loses parked replies, so the coordinator restarts with it.
+Robots is a guard inside the fetch worker. Each worker asks the robots actor `(origin, url)` before requesting. The actor owns policy and parks the call on a miss. The core never sees a policy.
 
-Checkpoint: a disallowed path never gets fetched; `Crawl-delay` stretches the request interval.
+#### Groundwork
+
+- [ ] Supervisor starts children in dependency order, fetchers before coordinator. Today the coordinator's `Start` races the factory's name registration.
+- [ ] Frontier drops `policy` and `grip`. The cooldown moves to the caller: `settle`, `requeue`, and `penalize` take `delay_ms`, and the slot stops storing it.
+
+Checkpoint: no behaviour change.
+
+#### Worker guard
+
+- [ ] Before the request, the worker calls the robots actor. Disallowed: report `Skipped`, make no request.
+- [ ] Page results carry the origin's crawl delay, so the core spaces the next request.
+- [ ] The call's timeout exceeds the robots fetch timeout. A timeout crashes the worker, and the crash requeues the scoop.
+
+#### Core
+
+- [ ] Fetch results are `Fetched(outcome, crawl_delay_ms)`, `Skipped`, or failed. Fetched: settle with the reported delay, or `spoon.rate_limit` when absent. Skipped: release the origin with no cooldown and no request counted.
+- [ ] Links are `seen` and queued on discovery, as today. The core filters nothing.
+- [ ] `user_agent` leaves `crawl.Settings`; the core never imports `grip`.
+
+Checkpoint: core tests use literal ints; cover a reported delay setting the cooldown, the default when absent, and a skipped scoop releasing its origin without cooldown.
+
+#### Robots actor
+
+- [ ] Holds `Dict(Origin, #(Policy, fetched_at))`, expires after ~24h via `config.clock`. A hit answers at once; a miss parks the caller and starts one fetch per origin. No I/O in the actor.
+- [ ] Owns the agent string, passed at start. Answers `#(allowed, crawl_delay_ms)` per call, using `grip.is_allowed` and `grip.rate`; never hands out policies.
+- [ ] Robots fetch on its own `Temporary` factory, sharing the user's `fetch` and request builder. `Visit` is page-shaped, and a robots crash has no scoop to requeue. ~500 KiB cap (RFC 9309), up to 5 redirects.
+- [ ] `grip.from_response` covers 4xx/5xx; transport errors and worker crashes become `disallow_all`.
+- [ ] `spoon.respect_robots(config, Bool)`, default `True`; `False`: the worker skips the call and reports no delay.
+- [ ] `rest_for_one` with the robots actor first: a crash restarts workers and the coordinator.
 
 ### 1e. Backoff
 
 - [ ] One path through `settle` with `Throttled`: a 429/503 page and grip's rate-limited robots error both push the origin's `next_at` back — `Retry-After` when present, else exponential via `failures`.
+- [ ] Robots 429: the actor answers with the `Retry-After` delay, and the worker reports `Throttled` so the core penalizes the origin.
 
 Checkpoint: a 429-ing origin slows exponentially while others continue, tested with the stepped clock.
 

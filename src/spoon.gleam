@@ -256,6 +256,7 @@ fn start_supervision_tree(
     |> factory.supervised()
 
   supervisor.new(supervisor.RestForOne)
+  |> supervisor.add(fetchers_supervisor)
   |> supervisor.add(
     supervision.worker(fn() {
       coordinator.start(
@@ -269,6 +270,5 @@ fn start_supervision_tree(
     })
     |> supervision.restart(supervision.Transient),
   )
-  |> supervisor.add(fetchers_supervisor)
   |> supervisor.start()
 }

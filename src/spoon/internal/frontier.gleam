@@ -12,7 +12,6 @@ pub type Scoop {
 
 pub type Slot {
   Slot(
-    delay_ms: Int,
     scoops: deque.Deque(Scoop),
     in_flight: option.Option(Scoop),
     failures: Int,
@@ -85,12 +84,7 @@ fn is_better(best: option.Option(#(Origin, Slot, Scoop)), slot: Slot) -> Bool {
   }
 }
 
-pub fn push(
-  frontier: Frontier,
-  scoop: Scoop,
-  delay_ms: Int,
-  now: Int,
-) -> Frontier {
+pub fn push(frontier: Frontier, scoop: Scoop, now: Int) -> Frontier {
   case dict.get(frontier.slots, scoop.origin) {
     Ok(slot) ->
       Frontier(slots: dict.insert(
@@ -103,7 +97,6 @@ pub fn push(
         frontier.slots,
         scoop.origin,
         Slot(
-          delay_ms: delay_ms,
           scoops: deque.from_list([scoop]),
           in_flight: option.None,
           failures: 0,
@@ -113,19 +106,28 @@ pub fn push(
   }
 }
 
-pub fn settle(frontier: Frontier, origin: Origin, now: Int) -> Frontier {
+pub fn settle(
+  frontier: Frontier,
+  origin: Origin,
+  delay_ms: Int,
+  now: Int,
+) -> Frontier {
   case dict.get(frontier.slots, origin) {
     Ok(slot) -> {
       use <- bool.guard(option.is_none(slot.in_flight), frontier)
-      let slot =
-        Slot(..slot, in_flight: option.None, next_at: now + slot.delay_ms)
+      let slot = Slot(..slot, in_flight: option.None, next_at: now + delay_ms)
       Frontier(slots: dict.insert(frontier.slots, origin, slot))
     }
     Error(_) -> frontier
   }
 }
 
-pub fn requeue(frontier: Frontier, origin: Origin, now: Int) -> Frontier {
+pub fn requeue(
+  frontier: Frontier,
+  origin: Origin,
+  delay_ms: Int,
+  now: Int,
+) -> Frontier {
   case dict.get(frontier.slots, origin) {
     Ok(Slot(scoops: scoops, in_flight: option.Some(scoop), ..) as slot) -> {
       Frontier(slots: dict.insert(
@@ -133,7 +135,7 @@ pub fn requeue(frontier: Frontier, origin: Origin, now: Int) -> Frontier {
         origin,
         Slot(
           ..slot,
-          next_at: now + slot.delay_ms,
+          next_at: now + delay_ms,
           in_flight: option.None,
           scoops: deque.push_front(
             scoops,
@@ -149,6 +151,7 @@ pub fn requeue(frontier: Frontier, origin: Origin, now: Int) -> Frontier {
 pub fn penalize(
   frontier: Frontier,
   origin: Origin,
+  delay_ms: Int,
   now: Int,
   retry_after: option.Option(Int),
 ) -> Frontier {
@@ -158,7 +161,7 @@ pub fn penalize(
       let backoff =
         option.lazy_unwrap(retry_after, fn() {
           // exponential backoff
-          slot.delay_ms * int.bitwise_shift_left(1, failures)
+          delay_ms * int.bitwise_shift_left(1, failures)
         })
       let slot =
         Slot(..slot, next_at: now + backoff, failures:, in_flight: option.None)
