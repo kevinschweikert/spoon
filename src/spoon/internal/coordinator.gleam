@@ -143,6 +143,7 @@ fn handle_message(
         outcome
         |> result.map(resolve_candidates(_, scoop))
         |> result.map(keep_requestable)
+        |> result.map(filter_by_prefetch)
         |> result.map(filter_by_scope(_, coordinator.config.scope))
 
       let #(crawl, effects) =
@@ -242,6 +243,16 @@ fn resolve_url(from: uri.Uri, link: uri.Uri) -> Result(uri.Uri, Nil) {
     True, False -> uri.Uri(..resolved, path: resolved.path <> "/")
     _, _ -> resolved
   }
+}
+
+fn filter_by_prefetch(
+  outcome: page.Outcome(item),
+  prefetch: fn(uri.Uri) -> Result(uri.Uri, page.FetchError),
+) -> page.Outcome(item) {
+  let candidates =
+    outcome.candidates
+    |> list.filter_map(prefetch)
+  page.Outcome(..outcome, candidates:)
 }
 
 fn filter_by_scope(

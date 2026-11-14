@@ -161,7 +161,7 @@ pub fn allowed_domains(builder: Builder(item), allowed: List(String)) {
   )
 }
 
-/// Disables host matching and basically crawls the whole web
+/// Disables host matching and basically crawls the whole web.
 /// Use with caution!
 pub fn allow_all_domains(builder: Builder(item)) {
   Builder(config.Config(..builder.config, scope: config.AllowAll))
