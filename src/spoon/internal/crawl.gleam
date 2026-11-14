@@ -40,12 +40,7 @@ pub type Effect {
 
 pub fn new(settings: Settings, now: Int) -> #(Crawl, List(Effect)) {
   let crawl =
-    Crawl(
-      settings:,
-      seen: set.new(),
-      frontier: frontier.new(settings.delay_ms),
-      requests: 0,
-    )
+    Crawl(settings:, seen: set.new(), frontier: frontier.new(), requests: 0)
 
   crawl
   |> push_links(settings.seeds, now)
@@ -98,6 +93,7 @@ fn push_links(crawl: Crawl, links: List(uri.Uri), now: Int) -> Crawl {
           frontier: frontier.push(
             crawl.frontier,
             frontier.new_scoop(site, url),
+            crawl.settings.delay_ms,
             now,
           ),
         )

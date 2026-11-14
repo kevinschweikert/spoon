@@ -27,7 +27,7 @@ pub type Slot {
 // - `in_flight` walks the whole dict on every call. A running counter
 //   updated in `pop`, `settle`, and `requeue` would avoid that traversal.
 pub opaque type Frontier {
-  Frontier(slots: dict.Dict(Origin, Slot), delay_ms: Int)
+  Frontier(slots: dict.Dict(Origin, Slot))
 }
 
 pub type Popped {
@@ -40,8 +40,8 @@ pub fn new_scoop(origin: Origin, url: uri.Uri) -> Scoop {
   Scoop(url:, depth: 0, attempts: 0, origin:)
 }
 
-pub fn new(delay_ms: Int) -> Frontier {
-  Frontier(slots: dict.new(), delay_ms:)
+pub fn new() -> Frontier {
+  Frontier(slots: dict.new())
 }
 
 pub fn pop(frontier: Frontier, now: Int) -> #(Frontier, Popped) {
@@ -51,7 +51,7 @@ pub fn pop(frontier: Frontier, now: Int) -> #(Frontier, Popped) {
       case slot.next_at > now {
         True -> #(frontier, Cooling(until: slot.next_at))
         False -> #(
-          Frontier(..frontier, slots: dict.insert(frontier.slots, origin, slot)),
+          Frontier(slots: dict.insert(frontier.slots, origin, slot)),
           Took(scoop),
         )
       }
@@ -85,32 +85,31 @@ fn is_better(best: option.Option(#(Origin, Slot, Scoop)), slot: Slot) -> Bool {
   }
 }
 
-pub fn push(frontier: Frontier, scoop: Scoop, now: Int) -> Frontier {
+pub fn push(
+  frontier: Frontier,
+  scoop: Scoop,
+  delay_ms: Int,
+  now: Int,
+) -> Frontier {
   case dict.get(frontier.slots, scoop.origin) {
     Ok(slot) ->
-      Frontier(
-        ..frontier,
-        slots: dict.insert(
-          frontier.slots,
-          scoop.origin,
-          Slot(..slot, scoops: deque.push_back(slot.scoops, scoop)),
-        ),
-      )
+      Frontier(slots: dict.insert(
+        frontier.slots,
+        scoop.origin,
+        Slot(..slot, scoops: deque.push_back(slot.scoops, scoop)),
+      ))
     Error(_) ->
-      Frontier(
-        ..frontier,
-        slots: dict.insert(
-          frontier.slots,
-          scoop.origin,
-          Slot(
-            delay_ms: frontier.delay_ms,
-            scoops: deque.from_list([scoop]),
-            in_flight: option.None,
-            failures: 0,
-            next_at: now,
-          ),
+      Frontier(slots: dict.insert(
+        frontier.slots,
+        scoop.origin,
+        Slot(
+          delay_ms: delay_ms,
+          scoops: deque.from_list([scoop]),
+          in_flight: option.None,
+          failures: 0,
+          next_at: now,
         ),
-      )
+      ))
   }
 }
 
@@ -120,7 +119,7 @@ pub fn settle(frontier: Frontier, origin: Origin, now: Int) -> Frontier {
       use <- bool.guard(option.is_none(slot.in_flight), frontier)
       let slot =
         Slot(..slot, in_flight: option.None, next_at: now + slot.delay_ms)
-      Frontier(..frontier, slots: dict.insert(frontier.slots, origin, slot))
+      Frontier(slots: dict.insert(frontier.slots, origin, slot))
     }
     Error(_) -> frontier
   }
@@ -129,22 +128,19 @@ pub fn settle(frontier: Frontier, origin: Origin, now: Int) -> Frontier {
 pub fn requeue(frontier: Frontier, origin: Origin, now: Int) -> Frontier {
   case dict.get(frontier.slots, origin) {
     Ok(Slot(scoops: scoops, in_flight: option.Some(scoop), ..) as slot) -> {
-      Frontier(
-        ..frontier,
-        slots: dict.insert(
-          frontier.slots,
-          origin,
-          Slot(
-            ..slot,
-            next_at: now + slot.delay_ms,
-            in_flight: option.None,
-            scoops: deque.push_front(
-              scoops,
-              Scoop(..scoop, attempts: scoop.attempts + 1),
-            ),
+      Frontier(slots: dict.insert(
+        frontier.slots,
+        origin,
+        Slot(
+          ..slot,
+          next_at: now + slot.delay_ms,
+          in_flight: option.None,
+          scoops: deque.push_front(
+            scoops,
+            Scoop(..scoop, attempts: scoop.attempts + 1),
           ),
         ),
-      )
+      ))
     }
     _ -> frontier
   }
@@ -162,12 +158,12 @@ pub fn penalize(
       let backoff =
         option.lazy_unwrap(retry_after, fn() {
           // exponential backoff
-          frontier.delay_ms * int.bitwise_shift_left(1, failures)
+          slot.delay_ms * int.bitwise_shift_left(1, failures)
         })
       let slot =
         Slot(..slot, next_at: now + backoff, failures:, in_flight: option.None)
       let slots = dict.insert(frontier.slots, origin, slot)
-      Frontier(..frontier, slots:)
+      Frontier(slots:)
     }
     Error(_) -> frontier
   }
