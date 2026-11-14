@@ -19,8 +19,8 @@ pub type Visit(item) {
     fetch: fn(request.Request(String)) ->
       Result(response.Response(String), page.FetchError),
     next: fn(response.Response(String)) -> List(uri.Uri),
-    on_page: fn(page.Page) -> #(item, page.Candidates),
-    report: fn(Result(#(item, page.Candidates), page.FetchError)) -> Nil,
+    on_page: fn(page.Page) -> page.Outcome(item),
+    report: fn(Result(page.Outcome(item), page.FetchError)) -> Nil,
   )
 }
 

@@ -27,7 +27,7 @@ pub type Crawl {
 }
 
 pub type Message {
-  Fetched(origin: Origin, result: Result(page.Candidates, page.FetchError))
+  Fetched(origin: Origin, result: Result(List(uri.Uri), page.FetchError))
   Crashed(origin: Origin)
   AfterWake
 }
@@ -62,7 +62,7 @@ pub fn update(crawl: Crawl, msg: Message, now: Int) -> #(Crawl, List(Effect)) {
           case result {
             Ok(candidates) ->
               crawl
-              |> push_links(candidates.links, now)
+              |> push_links(candidates, now)
               |> next(now)
             Error(_) -> next(crawl, now)
           }

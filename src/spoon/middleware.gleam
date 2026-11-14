@@ -3,91 +3,32 @@ import gleam/http/response
 import gleam/int
 import gleam/io
 import gleam/list
-import gleam/option
 import gleam/result
 import gleam/string
+import gleam/time/calendar
+import gleam/time/timestamp
 import gleam/uri
 import presentable_soup as soup
 import spoon/page
 
 pub fn log(
   page: page.Page,
-  handle: fn(page.Page) -> #(item, page.Candidates),
-) -> #(item, page.Candidates) {
+  handle: fn(page.Page) -> page.Outcome(item),
+) -> page.Outcome(item) {
   let url = page.url |> uri.to_string
-  io.println("HTTP " <> int.to_string(page.status) <> " " <> url)
+  let now = timestamp.system_time() |> timestamp.to_rfc3339(calendar.utc_offset)
+  io.println(now <> " " <> int.to_string(page.status) <> " " <> url)
   handle(page)
 }
 
 pub fn status_ok(
   if_not: item,
   page: page.Page,
-  handle: fn(page.Page) -> #(item, page.Candidates),
-) -> #(item, page.Candidates) {
+  handle: fn(page.Page) -> page.Outcome(item),
+) -> page.Outcome(item) {
   case page.status >= 200 && page.status < 400 {
     True -> handle(page)
-    False -> #(if_not, page.Candidates([]))
-  }
-}
-
-pub fn protocol_http(
-  page: page.Page,
-  handle: fn(page.Page) -> #(item, page.Candidates),
-) -> #(item, page.Candidates) {
-  let #(item, page.Candidates(links)) = handle(page)
-
-  #(
-    item,
-    links
-      |> list.filter_map(fn(link) {
-        case link.scheme {
-          option.None | option.Some("http") | option.Some("https") -> Ok(link)
-          _ -> Error(Nil)
-        }
-      })
-      |> page.Candidates,
-  )
-}
-
-pub fn same_host(
-  base_url: uri.Uri,
-  page: page.Page,
-  handle: fn(page.Page) -> #(item, page.Candidates),
-) -> #(item, page.Candidates) {
-  let #(item, page.Candidates(links)) = handle(page)
-
-  #(
-    item,
-    links
-      |> list.filter_map(fn(link) {
-        case base_url.host == link.host && base_url.scheme == link.scheme {
-          True -> Ok(link)
-          False -> Error(Nil)
-        }
-      })
-      |> page.Candidates,
-  )
-}
-
-pub fn resolve(
-  page: page.Page,
-  handle: fn(page.Page) -> #(item, page.Candidates),
-) -> #(item, page.Candidates) {
-  let #(item, page.Candidates(links)) = handle(page)
-
-  #(
-    item,
-    links
-      |> list.filter_map(resolve_url(page.url, _))
-      |> page.Candidates,
-  )
-}
-
-fn resolve_url(from: uri.Uri, link: uri.Uri) -> Result(uri.Uri, Nil) {
-  use resolved <- result.map(uri.merge(from, link))
-  case string.ends_with(link.path, "/"), string.ends_with(resolved.path, "/") {
-    True, False -> uri.Uri(..resolved, path: resolved.path <> "/")
-    _, _ -> resolved
+    False -> page.Outcome(item: if_not, candidates: [])
   }
 }
 

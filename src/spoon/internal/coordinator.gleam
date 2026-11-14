@@ -1,15 +1,18 @@
 import gleam/dict
 import gleam/erlang/process
 import gleam/http/request
+import gleam/list
+import gleam/option
 import gleam/otp/actor
 import gleam/otp/factory_supervisor
-import gleam/pair
 import gleam/result
+import gleam/string
 import gleam/uri
 import grip/origin
 import spoon/internal/config
 import spoon/internal/crawl
 import spoon/internal/fetcher
+import spoon/internal/frontier
 import spoon/page
 
 pub type Coordinator(item, acc) {
@@ -29,8 +32,8 @@ pub type Coordinator(item, acc) {
 pub type Message(item) {
   Start(List(crawl.Effect))
   Visited(
-    origin: origin.Origin,
-    answer: Result(#(item, page.Candidates), page.FetchError),
+    scoop: frontier.Scoop,
+    outcome: Result(page.Outcome(item), page.FetchError),
   )
   FailedToStart(origin: origin.Origin)
   FetcherDown(process.Down)
@@ -54,7 +57,7 @@ pub fn start(
 
     let crawl_settings =
       crawl.Settings(
-        seeds: [config.base_url, ..config.start_urls],
+        seeds: [config.base_url, ..config.seeds],
         delay_ms: config.delay_ms,
         max_concurrency: config.max_concurrency,
         max_pages: config.max_pages,
@@ -129,15 +132,26 @@ fn handle_message(
       |> execute(effects, now)
     }
 
-    Visited(origin:, answer:) -> {
-      let accumulator = case answer {
-        Ok(#(item, _)) -> coordinator.combine(coordinator.accumulator, item)
-        Error(_) -> coordinator.accumulator
-      }
+    Visited(scoop:, outcome:) -> {
+      let accumulator =
+        result.map(outcome, fn(outcome) {
+          coordinator.combine(coordinator.accumulator, outcome.item)
+        })
+        |> result.unwrap(coordinator.accumulator)
+
+      let outcome =
+        outcome
+        |> result.map(resolve_candidates(_, scoop))
+        |> result.map(keep_requestable)
+        |> result.map(filter_by_scope(_, coordinator.config.scope))
+
       let #(crawl, effects) =
         crawl.update(
           coordinator.crawl,
-          crawl.Fetched(origin, result.map(answer, pair.second)),
+          crawl.Fetched(
+            scoop.origin,
+            result.map(outcome, fn(outcome) { outcome.candidates }),
+          ),
           now,
         )
       Coordinator(..coordinator, crawl:, accumulator:)
@@ -176,7 +190,7 @@ fn execute(
           next: coordinator.config.next,
           on_page: coordinator.config.on_page,
           report: fn(result) {
-            process.send(coordinator.self, Visited(scoop.origin, result))
+            process.send(coordinator.self, Visited(scoop, result))
           },
         )
       case
@@ -210,4 +224,64 @@ fn build_request(
     |> result.replace_error(page.InvalidUrl(url)),
   )
   Ok(request.set_header(request, "user-agent", user_agent))
+}
+
+fn resolve_candidates(
+  outcome: page.Outcome(item),
+  scoop: frontier.Scoop,
+) -> page.Outcome(item) {
+  let candidates =
+    outcome.candidates
+    |> list.filter_map(resolve_url(scoop.url, _))
+  page.Outcome(..outcome, candidates:)
+}
+
+fn resolve_url(from: uri.Uri, link: uri.Uri) -> Result(uri.Uri, Nil) {
+  use resolved <- result.map(uri.merge(from, link))
+  case string.ends_with(link.path, "/"), string.ends_with(resolved.path, "/") {
+    True, False -> uri.Uri(..resolved, path: resolved.path <> "/")
+    _, _ -> resolved
+  }
+}
+
+fn filter_by_scope(
+  outcome: page.Outcome(item),
+  scope: config.Scope,
+) -> page.Outcome(item) {
+  let candidates =
+    outcome.candidates
+    |> list.filter(fn(link) {
+      case scope {
+        config.AllowAll -> True
+        config.AllowedHosts(hosts) -> {
+          host_match(link.host, hosts)
+        }
+      }
+    })
+  page.Outcome(..outcome, candidates:)
+}
+
+fn host_match(host: option.Option(String), hosts: List(String)) -> Bool {
+  case host {
+    option.None -> False
+    option.Some(host) -> {
+      // host strings are lowercased in the builder public API
+      hosts
+      |> list.contains(string.lowercase(host))
+    }
+  }
+}
+
+fn keep_requestable(outcome: page.Outcome(item)) -> page.Outcome(item) {
+  let candidates =
+    outcome.candidates
+    |> list.filter(fn(link) {
+      case link.scheme, link.host {
+        option.Some("http"), option.Some(_)
+        | option.Some("https"), option.Some(_)
+        -> True
+        _, _ -> False
+      }
+    })
+  page.Outcome(..outcome, candidates:)
 }

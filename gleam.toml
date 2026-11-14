@@ -1,7 +1,7 @@
 name = "spoon"
 version = "1.0.0"
 
-description = "ladle your presentable soup"
+description = "Ladle your (presentable) soup! Spoon is a Gleam crawler framework."
 licences = ["MIT"]
 repository = { type = "tangled", user = "kevinschweikert", repo = "spoon" }
 
@@ -17,6 +17,7 @@ gleam_stdlib = {git = "https://github.com/gleam-lang/stdlib", ref = "main"}
 # use hex managed when 1.0.0 is released
 grip = {git = "https://tangled.org/kevinschweikert.de/grip", ref = "main"}
 gleam_deque = ">= 1.0.0 and < 2.0.0"
+gleam_time = ">= 1.11.0 and < 2.0.0"
 
 [dev_dependencies]
 gleeunit = ">= 1.0.0 and < 2.0.0"

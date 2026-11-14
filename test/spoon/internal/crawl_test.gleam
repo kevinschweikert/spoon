@@ -46,7 +46,7 @@ fn settings_with(seeds: List(String)) -> crawl.Settings {
 }
 
 fn succeeded(text: String, links: List(String)) -> crawl.Message {
-  let candidates = page.Candidates(list.map(links, url))
+  let candidates = list.map(links, url)
   crawl.Fetched(origin_of(text), Ok(candidates))
 }
 

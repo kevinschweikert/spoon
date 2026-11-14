@@ -3,11 +3,13 @@ import gleam/http/request
 import gleam/http/response
 import gleam/httpc
 import gleam/list
+import gleam/option
 import gleam/otp/actor.{type StartResult}
 import gleam/otp/factory_supervisor as factory
 import gleam/otp/static_supervisor as supervisor
 import gleam/otp/supervision
 import gleam/result
+import gleam/string
 import gleam/uri
 import grip/origin
 
@@ -22,7 +24,8 @@ pub opaque type Builder(item) {
 }
 
 @external(erlang, "spoon_ffi", "monotonic_time")
-fn monotonic_time() -> Int
+@internal
+pub fn monotonic_time() -> Int
 
 /// Create a new crawl config
 ///
@@ -37,20 +40,26 @@ fn monotonic_time() -> Int
 /// |> spoon.run()
 /// ```
 pub fn new(url url: uri.Uri) -> Builder(Nil) {
-  Builder(config.Config(
-    base_url: url,
-    start_urls: [],
-    fetch: default_fetch,
-    on_page: default_on_page(url, _),
-    prefetch: Ok,
-    next: default_next,
-    max_pages: 10,
-    max_concurrency: 10,
-    user_agent: "spoon/1.0",
-    clock: monotonic_time,
-    delay_ms: 1000,
-    max_attempts: 3,
-  ))
+  Builder(
+    config.Config(
+      base_url: url,
+      seeds: [],
+      fetch: default_fetch,
+      on_page: default_on_page,
+      prefetch: Ok,
+      next: default_next,
+      max_pages: 10,
+      max_concurrency: 10,
+      user_agent: "spoon/1.0",
+      clock: monotonic_time,
+      delay_ms: 1000,
+      max_attempts: 3,
+      scope: case url.host {
+        option.Some(host) -> config.AllowedHosts([host])
+        option.None -> config.AllowedHosts([])
+      },
+    ),
+  )
 }
 
 /// Adds starting urls to the crawl list
@@ -62,12 +71,7 @@ pub fn new(url url: uri.Uri) -> Builder(Nil) {
 /// If no seed is given, the only starting url is the one given in
 /// `new`
 pub fn seed(builder: Builder(item), url: uri.Uri) -> Builder(item) {
-  Builder(
-    config.Config(..builder.config, start_urls: [
-      url,
-      ..builder.config.start_urls
-    ]),
-  )
+  Builder(config.Config(..builder.config, seeds: [url, ..builder.config.seeds]))
 }
 
 /// Callback when a new link was visited
@@ -78,17 +82,11 @@ pub fn seed(builder: Builder(item), url: uri.Uri) -> Builder(item) {
 /// Default is using the following middlewares:
 ///
 /// - `middleware.status_ok`
-/// - `middleware.same_host`
-/// - `middleware.resolve`
-/// - `middleware.protocol_http`
 pub fn on_page(
   builder: Builder(a),
-  on: fn(uri.Uri, page.Page) -> #(b, page.Candidates),
+  on_page: fn(page.Page) -> page.Outcome(b),
 ) -> Builder(b) {
-  let base_url = builder.config.base_url
-  Builder(
-    config.Config(..builder.config, on_page: fn(page) { on(base_url, page) }),
-  )
+  Builder(config.Config(..builder.config, on_page:))
 }
 
 /// Callback before a page gets visited
@@ -149,8 +147,32 @@ pub fn user_agent(builder: Builder(item), user_agent: String) -> Builder(item) {
   Builder(config.Config(..builder.config, user_agent:))
 }
 
-/// Just runs the crawl and call `on_page` for each page
-pub fn run(builder: Builder(Nil)) -> Nil {
+/// Each found link is compared with this list and only if they match the
+/// specified host, we continue crawling. The matching is case  insensitive.
+///
+/// By default the initial url is used  as the only host, so we crawl only
+/// on a single host if not further specified.
+pub fn allowed_domains(builder: Builder(item), allowed: List(String)) {
+  Builder(
+    config.Config(
+      ..builder.config,
+      scope: config.AllowedHosts(list.map(allowed, string.lowercase)),
+    ),
+  )
+}
+
+/// Disables host matching and basically crawls the whole web
+/// Use with caution!
+pub fn allow_all_domains(builder: Builder(item)) {
+  Builder(config.Config(..builder.config, scope: config.AllowAll))
+}
+
+/// Just runs the crawl and calls `on_page` for each page without any
+/// accumulator
+///
+/// This can be useful if you only need side effects to fill something
+/// like ETS. This avoids storing the intermediate state in the accumulator.
+pub fn run(builder: Builder(Nil)) -> Result(Nil, actor.StartError) {
   fold(builder, Nil, fn(_acc, _item) { Nil })
 }
 
@@ -162,35 +184,40 @@ pub fn fold(
   builder: Builder(item),
   initial: acc,
   combine: fn(acc, item) -> acc,
-) -> acc {
-  list.each([builder.config.base_url, ..builder.config.start_urls], fn(seed) {
-    let assert Ok(_) = origin.from_uri(seed)
-      as "seeds need an http(s) scheme and a host"
-  })
+) -> Result(acc, actor.StartError) {
+  let urls = [builder.config.base_url, ..builder.config.seeds]
+  let origins =
+    list.map(urls, fn(seed) {
+      origin.from_uri(seed) |> result.replace_error(seed)
+    })
+
+  use _ <- result.try(
+    result.all(origins)
+    |> result.map_error(fn(url) {
+      actor.InitFailed(
+        uri.to_string(url)
+        <> " is malformed. Ensure scheme and host are present",
+      )
+    }),
+  )
+
   let coordinator_name = process.new_name("coordinator")
   let fetchers_name = process.new_name("fetchers")
   let reply = process.new_subject()
-  let assert Ok(_) =
-    start_supervision_tree(
-      fetchers_name,
-      coordinator_name,
-      builder.config,
-      reply,
-      initial,
-      combine,
-    )
-  process.receive_forever(reply)
+  use _ <- result.try(start_supervision_tree(
+    fetchers_name,
+    coordinator_name,
+    builder.config,
+    reply,
+    initial,
+    combine,
+  ))
+  Ok(process.receive_forever(reply))
 }
 
-fn default_on_page(
-  base_url: uri.Uri,
-  page: page.Page,
-) -> #(Nil, page.Candidates) {
+fn default_on_page(page: page.Page) -> page.Outcome(Nil) {
   use page <- middleware.status_ok(Nil, page)
-  use page <- middleware.same_host(base_url, page)
-  use page <- middleware.resolve(page)
-  use page <- middleware.protocol_http(page)
-  #(Nil, page.Candidates(page.candidates))
+  page.Outcome(item: Nil, candidates: page.candidates)
 }
 
 fn default_next(resp: response.Response(String)) -> List(uri.Uri) {

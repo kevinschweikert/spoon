@@ -1,5 +1,7 @@
 # spoon
 
+Ladle your (presentable) soup! Spoon is a Gleam crawler framework.
+
 [![Package Version](https://img.shields.io/hexpm/v/spoon)](https://hex.pm/packages/spoon)
 [![Hex Docs](https://img.shields.io/badge/hex-docs-ffaff3)](https://spoon.hexdocs.pm/)
 

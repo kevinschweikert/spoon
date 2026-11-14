@@ -20,6 +20,12 @@ pub type Slot {
   )
 }
 
+// Postponed optimizations:
+// - `take_earliest` scans every origin slot on each pop. A balanced tree
+//   keyed by `next_at`, or one bucket per distinct `delay_ms`, would make
+//   origin lookups cheaper.
+// - `in_flight` walks the whole dict on every call. A running counter
+//   updated in `pop`, `settle`, and `requeue` would avoid that traversal.
 pub opaque type Frontier {
   Frontier(slots: dict.Dict(Origin, Slot), delay_ms: Int)
 }
