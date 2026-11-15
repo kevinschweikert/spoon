@@ -12,6 +12,7 @@ import gleam/result
 import gleam/string
 import gleam/uri
 import grip/origin
+import spoon/internal/policy_cache
 
 import spoon/internal/config
 import spoon/internal/coordinator
@@ -203,10 +204,12 @@ pub fn fold(
 
   let coordinator_name = process.new_name("coordinator")
   let fetchers_name = process.new_name("fetchers")
+  let policy_cache_name = process.new_name("policy_cache")
   let reply = process.new_subject()
   use _ <- result.try(start_supervision_tree(
     fetchers_name,
     coordinator_name,
+    policy_cache_name,
     builder.config,
     reply,
     initial,
@@ -243,6 +246,7 @@ fn default_fetch(
 
 fn start_supervision_tree(
   fetchers_name: process.Name(_),
+  policy_cache_name: process.Name(_),
   coordinator_name: process.Name(_),
   config: config.Config(item),
   reply: process.Subject(acc),
@@ -256,19 +260,16 @@ fn start_supervision_tree(
     |> factory.supervised()
 
   supervisor.new(supervisor.RestForOne)
+  |> supervisor.add(policy_cache.supervised(policy_cache_name, config))
   |> supervisor.add(fetchers_supervisor)
-  |> supervisor.add(
-    supervision.worker(fn() {
-      coordinator.start(
-        coordinator_name,
-        config,
-        initial,
-        combine,
-        reply,
-        fetchers_name,
-      )
-    })
-    |> supervision.restart(supervision.Transient),
-  )
+  |> supervisor.add(coordinator.supervised(
+    coordinator_name,
+    config,
+    initial,
+    combine,
+    reply,
+    fetchers_name,
+    policy_cache_name,
+  ))
   |> supervisor.start()
 }

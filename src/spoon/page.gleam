@@ -18,4 +18,5 @@ pub type FetchError {
   PrefetchRefused
   FetchError
   InvalidUrl(uri.Uri)
+  PolicyUnavailable
 }

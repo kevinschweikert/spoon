@@ -1,6 +1,3 @@
-import gleam/list
-import gleam/result
-import gleam/string
 import gleam/uri
 import spoon
 import spoon/middleware
@@ -10,13 +7,11 @@ pub fn main() {
   let assert Ok(url) = uri.parse("https://kevinschweikert.de")
 
   spoon.new(url)
-  |> spoon.max_pages(20)
+  |> spoon.max_pages(10)
   |> spoon.rate_limit(1000)
-  |> spoon.allowed_domains(["kevinschweikert.de", "github.com"])
+  |> spoon.allow_all_domains()
   |> spoon.on_page(on_site)
-  |> spoon.fold([], fn(acc, visited_url) { [visited_url, ..acc] })
-  |> result.map(list.sort(_, string.compare))
-  |> echo
+  |> spoon.fold([], fn(acc, _visited_url) { acc })
 }
 
 fn on_site(page: page.Page) -> page.Outcome(String) {

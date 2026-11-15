@@ -5,6 +5,7 @@ import gleam/list
 import gleam/option
 import gleam/otp/actor
 import gleam/otp/factory_supervisor
+import gleam/otp/supervision
 import gleam/result
 import gleam/string
 import gleam/uri
@@ -13,6 +14,7 @@ import spoon/internal/config
 import spoon/internal/crawl
 import spoon/internal/fetcher
 import spoon/internal/frontier
+import spoon/internal/policy_cache
 import spoon/page
 
 pub type Coordinator(item, acc) {
@@ -20,6 +22,7 @@ pub type Coordinator(item, acc) {
     self: process.Subject(Message(item)),
     name: process.Name(Message(item)),
     fetchers: process.Name(fetcher.Factory(item)),
+    policy_cache: process.Name(policy_cache.Message),
     reply: process.Subject(acc),
     crawl: crawl.Crawl,
     workers: dict.Dict(process.Pid, origin.Origin),
@@ -40,6 +43,21 @@ pub type Message(item) {
   Wake
 }
 
+pub fn supervised(
+  name: process.Name(Message(item)),
+  config: config.Config(item),
+  initial: acc,
+  combine: fn(acc, item) -> acc,
+  reply: process.Subject(acc),
+  fetchers: process.Name(fetcher.Factory(item)),
+  policy_cache: process.Name(policy_cache.Message),
+) {
+  supervision.worker(fn() {
+    start(name, config, initial, combine, reply, fetchers, policy_cache)
+  })
+  |> supervision.restart(supervision.Transient)
+}
+
 pub fn start(
   name: process.Name(Message(item)),
   config: config.Config(item),
@@ -47,6 +65,7 @@ pub fn start(
   combine: fn(acc, item) -> acc,
   reply: process.Subject(acc),
   fetchers: process.Name(fetcher.Factory(item)),
+  policy_cache: process.Name(policy_cache.Message),
 ) -> Result(actor.Started(process.Subject(Message(item))), actor.StartError) {
   actor.new_with_initialiser(100, fn(self: process.Subject(Message(item))) {
     let now = config.clock()
@@ -70,6 +89,7 @@ pub fn start(
       name:,
       self:,
       fetchers:,
+      policy_cache:,
       reply:,
       crawl:,
       workers: dict.new(),
@@ -208,6 +228,7 @@ fn execute(
     [crawl.Fetch(scoop), ..rest] -> {
       let visit =
         fetcher.Visit(
+          policy_cache: coordinator.policy_cache,
           scoop:,
           build_request: build_request(_, coordinator.config.user_agent),
           fetch: coordinator.config.fetch,

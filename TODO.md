@@ -37,20 +37,20 @@ Robots is a guard inside the fetch worker. Each worker asks the robots actor `(o
 
 #### Groundwork
 
-- [ ] Supervisor starts children in dependency order, fetchers before coordinator. Today the coordinator's `Start` races the factory's name registration.
-- [ ] Frontier drops `policy` and `grip`. The cooldown moves to the caller: `settle`, `requeue`, and `penalize` take `delay_ms`, and the slot stops storing it.
+- [x] Supervisor starts children in dependency order, fetchers before coordinator. Today the coordinator's `Start` races the factory's name registration.
+- [x] Frontier drops `policy` and `grip`. The cooldown moves to the caller: `settle`, `requeue`, and `penalize` take `delay_ms`, and the slot stops storing it.
 
 Checkpoint: no behaviour change.
 
 #### Worker guard
 
-- [ ] Before the request, the worker calls the robots actor. Disallowed: report `Skipped`, make no request.
-- [ ] Page results carry the origin's crawl delay, so the core spaces the next request.
+- [x] Before the request, the worker calls the robots actor. Disallowed: report `Skipped`, make no request.
+- [x] Page results carry the origin's crawl delay, so the core spaces the next request.
 - [ ] The call's timeout exceeds the robots fetch timeout. A timeout crashes the worker, and the crash requeues the scoop.
 
 #### Core
 
-- [ ] Fetch results are `Fetched(outcome, crawl_delay_ms)`, `Skipped`, or failed. Fetched: settle with the reported delay, or `spoon.rate_limit` when absent. Skipped: release the origin with no cooldown and no request counted.
+- [x] Fetch results are `Fetched(outcome, crawl_delay_ms)`, `Skipped`, or failed. Fetched: settle with the reported delay, or `spoon.rate_limit` when absent. Skipped: release the origin with no cooldown and no request counted.
 - [ ] Links are `seen` and queued on discovery, as today. The core filters nothing.
 - [ ] `user_agent` leaves `crawl.Settings`; the core never imports `grip`.
 
@@ -59,7 +59,7 @@ Checkpoint: core tests use literal ints; cover a reported delay setting the cool
 #### Robots actor
 
 - [ ] Holds `Dict(Origin, #(Policy, fetched_at))`, expires after ~24h via `config.clock`. A hit answers at once; a miss parks the caller and starts one fetch per origin. No I/O in the actor.
-- [ ] Owns the agent string, passed at start. Answers `#(allowed, crawl_delay_ms)` per call, using `grip.is_allowed` and `grip.rate`; never hands out policies.
+- [x] Owns the agent string, passed at start. Answers `#(allowed, crawl_delay_ms)` per call, using `grip.is_allowed` and `grip.rate`; never hands out policies.
 - [ ] Robots fetch on its own `Temporary` factory, sharing the user's `fetch` and request builder. `Visit` is page-shaped, and a robots crash has no scoop to requeue. ~500 KiB cap (RFC 9309), up to 5 redirects.
 - [ ] `grip.from_response` covers 4xx/5xx; transport errors and worker crashes become `disallow_all`.
 - [ ] `spoon.respect_robots(config, Bool)`, default `True`; `False`: the worker skips the call and reports no delay.

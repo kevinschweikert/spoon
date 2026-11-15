@@ -63,10 +63,7 @@ fn skipped(text: String) -> crawl.Message {
 
 pub fn start_fetches_each_origin_once_test() {
   let #(_, effects) =
-    crawl.new(
-      settings_with(["https://a.example/", "https://b.example/"]),
-      0,
-    )
+    crawl.new(settings_with(["https://a.example/", "https://b.example/"]), 0)
   let urls = fetched_urls(effects) |> list.sort(string.compare)
 
   assert urls == ["https://a.example/", "https://b.example/"]
@@ -121,10 +118,7 @@ pub fn links_on_other_origins_are_fetched_while_this_one_cools_test() {
   let links = ["https://b.example/1", "https://a.example/2"]
   let #(_, effects) =
     state
-    |> crawl.update(
-      succeeded("https://a.example/", links, option.None),
-      100,
-    )
+    |> crawl.update(succeeded("https://a.example/", links, option.None), 100)
 
   assert list.length(effects) == 2
   assert fetched_urls(effects) == ["https://b.example/1"]
@@ -157,7 +151,10 @@ pub fn a_failed_fetch_still_cools_the_origin_test() {
     |> crawl.update(crawl.AfterWake, 1100)
   let #(_, finished) =
     state
-    |> crawl.update(succeeded("https://a.example/second", [], option.None), 1200)
+    |> crawl.update(
+      succeeded("https://a.example/second", [], option.None),
+      1200,
+    )
 
   assert started == [fetch("https://a.example/")]
   assert failed_effects == [crawl.Wake(at: 1100)]
@@ -173,10 +170,7 @@ pub fn a_reported_crawl_delay_sets_the_cooldown_test() {
     )
   let #(_, effects) =
     state
-    |> crawl.update(
-      succeeded("https://a.example/", [], option.Some(3000)),
-      100,
-    )
+    |> crawl.update(succeeded("https://a.example/", [], option.Some(3000)), 100)
 
   assert effects == [crawl.Wake(at: 3100)]
 }
@@ -243,7 +237,10 @@ pub fn a_skip_on_one_origin_does_not_block_another_test() {
     |> crawl.update(skipped("https://a.example/private/x"), 0)
   let #(_, finished) =
     state
-    |> crawl.update(succeeded("https://b.example/private/x", [], option.None), 0)
+    |> crawl.update(
+      succeeded("https://b.example/private/x", [], option.None),
+      0,
+    )
 
   assert list.length(started) == 2
   assert after_skip == []
