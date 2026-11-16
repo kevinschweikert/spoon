@@ -46,7 +46,7 @@ Checkpoint: no behaviour change.
 
 - [x] Before the request, the worker calls the robots actor. Disallowed: report `Skipped`, make no request.
 - [x] Page results carry the origin's crawl delay, so the core spaces the next request.
-- [ ] The call's timeout exceeds the robots fetch timeout. A timeout crashes the worker, and the crash requeues the scoop.
+- [ ] The call's timeout exceeds the robots fetch timeout. A timeout reports `Skipped(RobotsUnavailable)` instead of crashing the worker.
 
 #### Core
 
@@ -65,21 +65,36 @@ Checkpoint: core tests use literal ints; cover a reported delay setting the cool
 - [ ] `spoon.respect_robots(config, Bool)`, default `True`; `False`: the worker skips the call and reports no delay.
 - [ ] `rest_for_one` with the robots actor first: a crash restarts workers and the coordinator.
 
+#### Shared worker
+
+- [ ] `spoon/internal/worker`: one actor per `factory_supervisor`. Owns `running: Dict(Pid, Subject(Result(output, Crashed)))`.
+  - Messages: `Start(job, reply_to)`, `Done(pid, output)`, `Down(process.Down)`.
+  - `Start`: `factory.start_child(job)`, `process.monitor(pid)`, insert `pid → reply_to`. On factory error, reply `Crashed` at once.
+  - `Done(pid, output)`: pop `pid`; if present, reply `Ok(output)`. Worker sends `Done` before it exits, so the message reaches the actor before its `Down`.
+  - `Down(pid)`: pop `pid`; if present, reply `Crashed`. If absent, the `Done` already replied, so ignore.
+  - One reply path: only the actor replies, and whoever removes the pid owns the reply. No double replies.
+  - Page and robots factories each get one actor, so monitoring and replies live once. The coordinator sends `Start` instead of calling `start_child`.
+- [ ] Worker actor restart: `running` and its reply subjects are lost, so the actor can't answer them. `Start` carries a deadline; the caller's wait times out and it treats that as `Crashed`. No caller monitors. Same timeout covers a hung child. Children of the old factory must not send into the new actor: put the factory under the actor so it restarts with it, or have children exit when the actor goes down.
+- [ ] No pool or queue: robots lookups run inside page workers, so `max_concurrency` already caps them. Revisit if a caller outside the crawl ever reaches the robots actor.
+- [ ] Robots `spawn_fetch` moves onto it; a crash becomes `disallow_all` for the parked callers (1d) instead of a silent hang.
+
 ### 1e. Backoff
 
 - [ ] One path through `settle` with `Throttled`: a 429/503 page and grip's rate-limited robots error both push the origin's `next_at` back — `Retry-After` when present, else exponential via `failures`.
 - [ ] Robots 429: the actor answers with the `Retry-After` delay, and the worker reports `Throttled` so the core penalizes the origin.
+- [ ] Retry `Timeout`, `Network`, 429, and 5xx up to `max_attempts` through `requeue`. A crash reports `Failed(Crashed)` once, no requeue.
 
 Checkpoint: a 429-ing origin slows exponentially while others continue, tested with the stepped clock.
 
 ## 2. Builds on the new `Scoop`/`Host` (after 1c)
 
-- [ ] `max_depth`, separate from `max_pages`.
+- [ ] `max_depth`, separate from `max_pages`. `Scoop.depth` is hardcoded to 0 today, so set it from the parent in `push_links`.
 - [ ] Redirect hop limit on the scoop; redirects don't increment depth. Targets still pass dedup, robots, and the origin's clock.
 - [ ] Cap queued scoops per origin — with the max URL length below, bounds the frontier against spider traps (calendars, faceted search, session IDs).
-- [ ] Progress stats: queued, in flight, done, failed, rejected via `spoon.stats(subject)`. Can be an observer over the effect stream in the shell, not core logic.
-- [ ] Hook for fetch failures / dead links; `Errored` drops silently today. Same effect-stream observer site as stats.
-- [ ] Crawl timeout and graceful cancellation via a `Stop` message.
+- [ ] Global `max_frontier` cap on queued scoops: `push_links` drops new links when full and counts the drops, so the core never blocks.
+- [ ] Progress stats: queued, in flight, done, failed, rejected via `spoon.stats` on the `start` handle (section 4). Can be an observer over the effect stream in the shell, not core logic.
+- [ ] Dead links: a `fold` over `Failed` visits (section 4). The coordinator drops fetch errors today.
+- [ ] Crawl timeout and graceful cancellation: `spoon.stop` on the `start` handle sends `Stop`.
 
 ## 3. Independent, any order
 
@@ -90,13 +105,14 @@ Crawl scope in the coordinator — a boundary an `on_page` override can't lose. 
 - [x] Delete `same_host`, `resolve`, `protocol_http`. `default_on_page` shrinks to `status_ok`; `on_page` callback becomes `fn(Page) -> #(item, Candidates)`. Candidates may be relative until enqueue.
 - [x] `allow_all_hosts` waits for 1c politeness + 1d robots: an open-web crawl with no rate limit and no robots.txt hammers strangers' servers.
 
-Remaining middleware (`log`, `status_ok`, `redirect`, `content_type`, `anchors`):
+Extraction helpers and scope knobs:
 
-- [ ] Is the `guard`/`extract` split still worth it for five functions? Either way, give guards a real outcome type instead of overloading `Result`.
-- [ ] `extract.content_type(resp) -> List(String)` segments (like `wisp.path_segments`); then decide if the reject-gate form survives.
-- [ ] Path include/exclude (glob/regex allow/deny) as `prefetch`-stage guards.
-- [ ] `rel="nofollow"` / `noindex` and canonical-link preference as `next`-stage guards.
-- [ ] Sitemap ingestion via `extract.sitemap_locs` from `next`; `grip.sitemaps(policy)` needs the robots cache (1d).
+- [ ] `extract.content_type(resp) -> List(String)` segments (like `wisp.path_segments`).
+- [ ] Path include/exclude (glob/regex allow/deny) as scope knobs, enforced by the shell like hosts.
+- [ ] Subdomain matching as an explicit scope option (Crawlee's `same-domain`), never implied by a name.
+- [ ] `rel="nofollow"`: extractors return `Link(url: Uri, nofollow: Bool)` (like Scrapy's `Link`), plus a `Uri -> Link` helper so custom extractors stay one-liners. Nofollow links stay in `page.links` but out of the crawl. `spoon.respect_nofollow(Bool)`, default `True`.
+- [ ] `noindex` and canonical-link preference.
+- [ ] Sitemap ingestion via `extract.sitemap_locs` in `extract_links`; `grip.sitemaps(policy)` needs the robots cache (1d).
 
 Worker-local fetching:
 
@@ -104,6 +120,7 @@ Worker-local fetching:
 - [ ] `fetch.Fetch = fn(Request(String)) -> Result(Response(BitArray), FetchError)`: bytes out, charset decode from `Content-Type` with lossy fallback happens worker-side so every transport gets it (plain `dispatch` fails on non-UTF-8 pages); default uses `dispatch_bits`. Breaking after 1.0 — decide first.
 - [ ] Two config layers: request-level (`user_agent`, `spoon.headers`) set on the `Request` before fetch, reaches every impl; transport-level lives in `fetch.Options` — only transport-advisory fields, never headers or crawl policy. `fetch_timeout` keeps its prefix: plain `timeout` is the crawl timeout (section 2).
 - [ ] Documented contract on `spoon.fetch`: never follow redirects (section 2 owns them), don't strip spoon's headers, honor options where the transport can. `Options` plain record vs opaque + accessors: settle at build time (Gleam opacity is module-scoped).
+- [ ] Skip unwanted bodies by `Content-Type`/`Content-Length` before downloading, where the transport can (Colly's `OnResponseHeaders`, Hop's HEAD prefetch).
 
 Standalone filters:
 
@@ -111,8 +128,29 @@ Standalone filters:
 
 Housekeeping:
 
-- [ ] Tests for pure helpers (`normalize`, `resolve_url`, guard predicates). Zero coverage now.
+- [ ] Tests for pure helpers (`normalize`, `resolve_url`, `extract`). Zero coverage now.
 - [ ] Remove demo from docs/codebase
+- [ ] README example passes a String to `spoon.new`, which takes a `Uri`.
+
+## 4. Page API: `extract_links`, `on_page`, `fold`
+
+Breaking change to `spoon@1`, done while the repo is young. Per URL: fetch → `extract_links` → resolve, keep http(s), `normalize` → `Page(Nil)` → `on_page` (fetchers, parallel) → scope filter → enqueue. `fold` (coordinator, serial) gets one `Visit` per attempted URL, after retries.
+
+- [ ] Opaque `Page(item)`. Accessors `url`, `status`, `depth`, `links`, `item`; setters `with_item(p, b) -> Page(b)` and `nofollow(p, fn(Uri) -> Bool)`. Fields can grow without breaking; `page.new(url)` for users' tests.
+- [ ] `links`: every link on the page, out-of-scope ones included. `nofollow` keeps a link in `links` but out of the crawl; a predicate can't add URLs.
+- [ ] `extract_links(b, fn(Response(String)) -> List(Link))`, default `extract.anchors` on HTML. Replaces `next`, and is the only way to add URLs. `Link` in section 3.
+- [ ] `on_page(b, fn(Page(Nil), Response(String)) -> Page(item))`, called for 2xx only. Body and headers stay in the `Response`, decoded worker-side (section 3).
+- [ ] `fold(b, init, fn(acc, Visit(item)) -> acc)`, `Visit = Fetched(Page(item)) | Redirected(url, to, status) | Skipped(url, Skip) | Failed(url, Failure)`. Redirects and robots skips aren't errors.
+- [ ] `Skip = Disallowed | RobotsUnavailable`; `Failure = Status(Int) | Timeout | Network | Crashed(String) | InvalidUrl`. `Crashed` carries the exit reason.
+- [ ] 3xx: `fold` gets `Redirected`, the shell enqueues `to`; the section 2 hop limit applies.
+- [ ] `max_pages` counts responses (`Fetched`, `Redirected`, `Failed(Status)`), not skips or transport failures.
+- [ ] No parent field. A URL is fetched once, so a parent is a tree; referrers come from inverting `links` after the crawl.
+- [ ] Delete `prefetch`, `next`, `Outcome`, and `Report` from the public API. `middleware` becomes pure helpers in `extract` (`anchors`, `content_type`, `sitemap_locs`); `status_ok` and `redirect` go; `log` wraps a fold function.
+- [ ] `spoon.Error` (`InvalidSeed(Uri)`, start failure) instead of `actor.StartError`.
+- [ ] `start(b, init, fold) -> Result(Crawl(acc), Error)` with `await`, `stop`, `stats`. `fold` is `start` + `await`; `run` is `fold` over `Nil`.
+- [ ] Renames: `allowed_hosts`/`allow_all_hosts` (matching is exact-host; "domain" suggests subdomains), `delay` for `rate_limit`.
+
+Checkpoint: a link graph and a dead-link report are each one `fold` with the default `on_page`.
 
 ## Later / maybe
 
@@ -121,3 +159,6 @@ Housekeeping:
 - [ ] Multi-node distribution; the OTP architecture would support it.
 - [ ] Dry-run mode: an interpreter that prints `StartFetch` instead of fetching — preview what a crawl would touch before running it.
 - [ ] JS target: the pure core is runtime-agnostic; only the OTP shell would need a promise-based counterpart.
+- [ ] Check external links without crawling them: out-of-scope links fetched once, never expanded, via `expand: Bool` on the scoop (Heritrix hop paths).
+- [ ] Parent-to-child context during the crawl (Colly `Ctx`, Crawlee `userData`). The post-crawl join over `links` covers it until then.
+- [ ] Make the frontier `Slot` lifecycle explicit (idle, in flight, cooling, penalized) as a union type with `update`, instead of `in_flight`/`next_at`/`failures` combinations. Plain Gleam, no state machine dependency.

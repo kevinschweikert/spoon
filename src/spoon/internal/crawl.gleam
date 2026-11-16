@@ -19,6 +19,7 @@ pub type Settings {
 pub type Crawl {
   Crawl(
     settings: Settings,
+    // NOTE: maybe a bloom filter or ETS table will be necessary
     seen: set.Set(uri.Uri),
     frontier: frontier.Frontier,
     requests: Int,

@@ -73,8 +73,16 @@ pub fn anchors(body: String) -> List(uri.Uri) {
     |> result.unwrap([])
 
   use anchor <- list.filter_map(anchors)
-  anchor
-  |> dict.from_list()
-  |> dict.get("href")
-  |> result.try(uri.parse)
+  let attributes = dict.from_list(anchor)
+  case dict.get(attributes, "rel") |> result.map(is_nofollow) {
+    Ok(True) -> Error(Nil)
+    _ -> dict.get(attributes, "href") |> result.try(uri.parse)
+  }
+}
+
+fn is_nofollow(rel: String) -> Bool {
+  rel
+  |> string.lowercase
+  |> string.split(" ")
+  |> list.contains("nofollow")
 }
