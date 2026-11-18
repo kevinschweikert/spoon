@@ -5,18 +5,16 @@ import gleam/httpc
 import gleam/list
 import gleam/option
 import gleam/otp/actor.{type StartResult}
-import gleam/otp/factory_supervisor as factory
 import gleam/otp/static_supervisor as supervisor
-import gleam/otp/supervision
 import gleam/result
 import gleam/string
 import gleam/uri
 import grip/origin
 import spoon/internal/policy_cache
+import spoon/internal/worker
 
 import spoon/internal/config
 import spoon/internal/coordinator
-import spoon/internal/fetcher
 import spoon/middleware
 import spoon/page
 
@@ -203,11 +201,11 @@ pub fn fold(
   )
 
   let coordinator_name = process.new_name("coordinator")
-  let fetchers_name = process.new_name("fetchers")
+  let workers_name = process.new_name("workers")
   let policy_cache_name = process.new_name("policy_cache")
   let reply = process.new_subject()
   use _ <- result.try(start_supervision_tree(
-    fetchers_name,
+    workers_name,
     coordinator_name,
     policy_cache_name,
     builder.config,
@@ -245,7 +243,7 @@ fn default_fetch(
 }
 
 fn start_supervision_tree(
-  fetchers_name: process.Name(_),
+  worker_name: process.Name(worker.Message),
   policy_cache_name: process.Name(_),
   coordinator_name: process.Name(_),
   config: config.Config(item),
@@ -253,22 +251,20 @@ fn start_supervision_tree(
   initial: acc,
   combine: fn(acc, item) -> acc,
 ) -> StartResult(_) {
-  let fetchers_supervisor =
-    factory.worker_child(fetcher.start)
-    |> factory.named(fetchers_name)
-    |> factory.restart_strategy(supervision.Temporary)
-    |> factory.supervised()
-
   supervisor.new(supervisor.RestForOne)
-  |> supervisor.add(policy_cache.supervised(policy_cache_name, config))
-  |> supervisor.add(fetchers_supervisor)
+  |> supervisor.add(worker.supervised(worker_name))
+  |> supervisor.add(policy_cache.supervised(
+    policy_cache_name,
+    config,
+    worker_name,
+  ))
   |> supervisor.add(coordinator.supervised(
     coordinator_name,
     config,
     initial,
     combine,
     reply,
-    fetchers_name,
+    worker_name,
     policy_cache_name,
   ))
   |> supervisor.start()

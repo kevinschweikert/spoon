@@ -15,10 +15,14 @@ import grip
 import grip/origin
 import spoon/internal/config
 import spoon/internal/frontier
+import spoon/internal/worker
 import spoon/page
 
 type Waiting {
-  Waiting(scoop: frontier.Scoop, reply: fn(Result(PolicyAnswer, Nil)) -> Nil)
+  Waiting(
+    scoop: frontier.Scoop,
+    reply: process.Subject(Result(PolicyAnswer, Nil)),
+  )
 }
 
 type Cache(item) {
@@ -27,6 +31,7 @@ type Cache(item) {
     config: config.Config(item),
     policies: dict.Dict(origin.Origin, Entry),
     pending: dict.Dict(origin.Origin, List(Waiting)),
+    workers: process.Name(worker.Message),
   )
 }
 
@@ -41,7 +46,10 @@ type Lookup {
 }
 
 pub type Message {
-  Check(scoop: frontier.Scoop, reply: fn(Result(PolicyAnswer, Nil)) -> Nil)
+  Check(
+    scoop: frontier.Scoop,
+    reply: process.Subject(Result(PolicyAnswer, Nil)),
+  )
   Policy(origin: origin.Origin, policy: Result(grip.Policy, Nil))
 }
 
@@ -52,16 +60,24 @@ pub type PolicyAnswer {
 pub fn supervised(
   name: process.Name(Message),
   config: config.Config(item),
+  workers: process.Name(worker.Message),
 ) -> supervision.ChildSpecification(process.Subject(Message)) {
-  supervision.worker(fn() { start(name, config) })
-  |> supervision.restart(supervision.Transient)
+  supervision.worker(fn() { start(name, config, workers) })
+  |> supervision.restart(supervision.Permanent)
 }
 
 pub fn start(
   name: process.Name(Message),
   config: config.Config(item),
+  workers: process.Name(worker.Message),
 ) -> Result(actor.Started(process.Subject(Message)), actor.StartError) {
-  actor.new(Cache(name:, config:, policies: dict.new(), pending: dict.new()))
+  actor.new(Cache(
+    name:,
+    config:,
+    policies: dict.new(),
+    pending: dict.new(),
+    workers:,
+  ))
   |> actor.on_message(handle_message)
   |> actor.named(name)
   |> actor.start
@@ -81,7 +97,12 @@ fn handle_message(
         }
         Pending -> cache |> add_pending(waiting) |> actor.continue
         Stale -> {
-          spawn_fetch(cache.name, cache.config.fetch, scoop.origin)
+          spawn_fetch(
+            cache.name,
+            cache.workers,
+            cache.config.fetch,
+            scoop.origin,
+          )
           cache |> add_pending(waiting) |> actor.continue
         }
       }
@@ -115,7 +136,7 @@ fn answer(
 ) -> Nil {
   case policy {
     Ok(policy) -> resolve(policy, user_agent, waiting.scoop, waiting.reply)
-    Error(_) -> waiting.reply(Error(Nil))
+    Error(_) -> process.send(waiting.reply, Error(Nil))
   }
 }
 
@@ -137,16 +158,28 @@ fn lookup(cache: Cache(item), scoop: frontier.Scoop) -> Lookup {
 }
 
 fn spawn_fetch(
-  name: process.Name(Message),
+  name: _,
+  worker_name: _,
   fetch: fn(request.Request(String)) ->
     Result(response.Response(String), page.FetchError),
   origin: origin.Origin,
-) -> process.Pid {
+) -> Nil {
   let subject = process.named_subject(name)
-  process.spawn(fn() {
-    let policy = fetch_robots(fetch, origin)
-    process.send(subject, Policy(origin:, policy:))
-  })
+
+  worker.start_job(
+    worker_name,
+    worker.Job(
+      run: fn() {
+        fetch_robots(fetch, origin)
+        |> Policy(origin:, policy: _)
+        |> process.send(subject, _)
+      },
+      on_error: fn(_reason) {
+        Policy(origin:, policy: Error(Nil))
+        |> process.send(subject, _)
+      },
+    ),
+  )
 }
 
 fn add_pending(cache: Cache(item), waiting: Waiting) -> Cache(item) {
@@ -177,7 +210,7 @@ fn resolve(
   policy: grip.Policy,
   user_agent: String,
   scoop: frontier.Scoop,
-  reply: fn(Result(PolicyAnswer, Nil)) -> Nil,
+  reply: process.Subject(Result(PolicyAnswer, Nil)),
 ) -> Nil {
   let allowed = grip.is_allowed(policy, user_agent, scoop.url)
   let delay_ms =
@@ -185,5 +218,5 @@ fn resolve(
     |> result.map(fn(rate) { float.round(grip.interval(rate) *. 1000.0) })
     |> option.from_result
 
-  reply(Ok(PolicyAnswer(allowed, delay_ms)))
+  process.send(reply, Ok(PolicyAnswer(allowed, delay_ms)))
 }

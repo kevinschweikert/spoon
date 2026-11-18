@@ -1,10 +1,9 @@
-import gleam/dict
 import gleam/erlang/process
 import gleam/http/request
+import gleam/http/response
 import gleam/list
 import gleam/option
 import gleam/otp/actor
-import gleam/otp/factory_supervisor
 import gleam/otp/supervision
 import gleam/result
 import gleam/string
@@ -12,20 +11,21 @@ import gleam/uri
 import grip/origin
 import spoon/internal/config
 import spoon/internal/crawl
-import spoon/internal/fetcher
 import spoon/internal/frontier
 import spoon/internal/policy_cache
+
+// import spoon/internal/policy_cache
+import spoon/internal/worker
 import spoon/page
 
 pub type Coordinator(item, acc) {
   Coordinator(
     self: process.Subject(Message(item)),
     name: process.Name(Message(item)),
-    fetchers: process.Name(fetcher.Factory(item)),
+    workers: process.Name(worker.Message),
     policy_cache: process.Name(policy_cache.Message),
     reply: process.Subject(acc),
     crawl: crawl.Crawl,
-    workers: dict.Dict(process.Pid, origin.Origin),
     config: config.Config(item),
     accumulator: acc,
     combine: fn(acc, item) -> acc,
@@ -38,8 +38,7 @@ pub type Message(item) {
     scoop: frontier.Scoop,
     report: Result(page.Report(item), page.FetchError),
   )
-  FailedToStart(origin: origin.Origin)
-  FetcherDown(process.Down)
+  FetcherDown(origin: origin.Origin)
   Wake
 }
 
@@ -49,11 +48,11 @@ pub fn supervised(
   initial: acc,
   combine: fn(acc, item) -> acc,
   reply: process.Subject(acc),
-  fetchers: process.Name(fetcher.Factory(item)),
+  workers: process.Name(worker.Message),
   policy_cache: process.Name(policy_cache.Message),
-) {
+) -> supervision.ChildSpecification(process.Subject(Message(item))) {
   supervision.worker(fn() {
-    start(name, config, initial, combine, reply, fetchers, policy_cache)
+    start(name, config, initial, combine, reply, workers, policy_cache)
   })
   |> supervision.restart(supervision.Transient)
 }
@@ -64,15 +63,11 @@ pub fn start(
   initial: acc,
   combine: fn(acc, item) -> acc,
   reply: process.Subject(acc),
-  fetchers: process.Name(fetcher.Factory(item)),
+  workers: process.Name(worker.Message),
   policy_cache: process.Name(policy_cache.Message),
 ) -> Result(actor.Started(process.Subject(Message(item))), actor.StartError) {
   actor.new_with_initialiser(100, fn(self: process.Subject(Message(item))) {
     let now = config.clock()
-    let selector =
-      process.new_selector()
-      |> process.select_monitors(FetcherDown)
-      |> process.select(self)
 
     let crawl_settings =
       crawl.Settings(
@@ -88,17 +83,15 @@ pub fn start(
     Coordinator(
       name:,
       self:,
-      fetchers:,
+      workers:,
       policy_cache:,
       reply:,
       crawl:,
-      workers: dict.new(),
       config:,
       accumulator: initial,
       combine:,
     )
     |> actor.initialised()
-    |> actor.selecting(selector)
     |> actor.returning(self)
     |> Ok
   })
@@ -115,39 +108,9 @@ fn handle_message(
   case message {
     Start(effects) -> execute(coordinator, effects, now)
 
-    FetcherDown(process.ProcessDown(reason: process.Normal, pid:, ..)) -> {
-      Coordinator(..coordinator, workers: dict.delete(coordinator.workers, pid))
-      |> actor.continue()
-    }
-    FetcherDown(process.ProcessDown(pid:, ..)) -> {
-      case dict.get(coordinator.workers, pid) {
-        Ok(origin) -> {
-          let #(crawl, effects) =
-            crawl.update(coordinator.crawl, crawl.Crashed(origin), now)
-          Coordinator(
-            ..coordinator,
-            crawl:,
-            workers: dict.delete(coordinator.workers, pid),
-          )
-          |> execute(effects, now)
-        }
-        Error(_) -> {
-          let #(crawl, effects) =
-            crawl.update(coordinator.crawl, crawl.AfterWake, now)
-          Coordinator(..coordinator, crawl:)
-          |> execute(effects, now)
-        }
-      }
-    }
-    FailedToStart(origin:) -> {
+    FetcherDown(origin) -> {
       let #(crawl, effects) =
         crawl.update(coordinator.crawl, crawl.Crashed(origin), now)
-      Coordinator(..coordinator, crawl:)
-      |> execute(effects, now)
-    }
-    FetcherDown(_) -> {
-      let #(crawl, effects) =
-        crawl.update(coordinator.crawl, crawl.AfterWake, now)
       Coordinator(..coordinator, crawl:)
       |> execute(effects, now)
     }
@@ -226,38 +189,66 @@ fn execute(
       execute(coordinator, rest, now)
     }
     [crawl.Fetch(scoop), ..rest] -> {
-      let visit =
-        fetcher.Visit(
-          policy_cache: coordinator.policy_cache,
-          scoop:,
-          build_request: build_request(_, coordinator.config.user_agent),
-          fetch: coordinator.config.fetch,
-          next: coordinator.config.next,
-          on_page: coordinator.config.on_page,
-          report: fn(result) {
-            process.send(coordinator.self, Reported(scoop, result))
-          },
-        )
-      case
-        factory_supervisor.start_child(
-          factory_supervisor.get_by_name(coordinator.fetchers),
-          visit,
-        )
-      {
-        Ok(fetcher) -> {
-          process.monitor(fetcher.pid)
-          let workers =
-            dict.insert(coordinator.workers, fetcher.pid, scoop.origin)
-          Coordinator(..coordinator, workers:)
-          |> execute(rest, now)
-        }
-        Error(_) -> {
-          process.send(coordinator.self, FailedToStart(scoop.origin))
-          execute(coordinator, rest, now)
+      let Coordinator(self: coordinator_subject, config:, policy_cache:, ..) =
+        coordinator
+      let config.Config(fetch:, next:, on_page:, user_agent:, ..) = config
+      let fetcher = fn() {
+        let policy_answer =
+          process.call(process.named_subject(policy_cache), 10_000, fn(reply) {
+            policy_cache.Check(scoop:, reply:)
+          })
+        case policy_answer {
+          Ok(policy_cache.PolicyAnswer(allowed:, delay_ms:)) -> {
+            case allowed {
+              False -> {
+                Ok(page.Skipped)
+                |> Reported(scoop:, report: _)
+                |> process.send(coordinator_subject, _)
+              }
+              True -> {
+                do_fetch(scoop, user_agent, fetch, next, on_page)
+                |> result.map(page.Fetched(_, delay_ms))
+                |> Reported(scoop:, report: _)
+                |> process.send(coordinator_subject, _)
+              }
+            }
+          }
+          Error(_) -> {
+            Error(page.PolicyUnavailable)
+            |> Reported(scoop:, report: _)
+            |> process.send(coordinator_subject, _)
+          }
         }
       }
+      let job =
+        worker.Job(run: fetcher, on_error: fn(_reason) {
+          process.send(coordinator_subject, FetcherDown(origin: scoop.origin))
+        })
+
+      worker.start_job(coordinator.workers, job)
+      execute(coordinator, rest, now)
     }
   }
+}
+
+fn do_fetch(
+  scoop: frontier.Scoop,
+  user_agent: String,
+  fetch: fn(request.Request(String)) ->
+    Result(response.Response(String), page.FetchError),
+  next: fn(response.Response(String)) -> List(uri.Uri),
+  on_page: fn(page.Page) -> page.Outcome(item),
+) -> Result(page.Outcome(item), page.FetchError) {
+  use request <- result.try(build_request(scoop.url, user_agent))
+  use response <- result.try(fetch(request))
+  page.Page(
+    url: scoop.url,
+    status: response.status,
+    body: response.body,
+    candidates: next(response),
+  )
+  |> on_page()
+  |> Ok
 }
 
 fn build_request(
