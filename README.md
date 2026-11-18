@@ -13,7 +13,10 @@ gleam add spoon@1
 import spoon
 
 pub fn main() -> Nil {
-      spoon.new("https://example.com")
+      let assert Ok(example_com) = uri.parse("https://example.com")
+
+      example_com
+      |> spoon.new()
       |> spoon.run()
 }
 ```

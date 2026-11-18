@@ -59,7 +59,6 @@ Checkpoint: a link graph and a dead-link report are each one `fold`.
 
 - [ ] Tests for `normalize`, `resolve_url`, `extract`
 - [ ] Remove the demo
-- [ ] README passes a String to `spoon.new`, which takes a `Uri`
 
 ## Later / maybe
 
