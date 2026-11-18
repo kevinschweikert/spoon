@@ -1,12 +1,15 @@
 import gleam/erlang/process
 import gleam/http/request
 import gleam/http/response
+import gleam/int
 import gleam/list
 import gleam/option
 import gleam/otp/actor
 import gleam/otp/supervision
 import gleam/result
 import gleam/string
+import gleam/time/duration
+import gleam/time/timestamp
 import gleam/uri
 import grip/origin
 import spoon/internal/config
@@ -36,7 +39,7 @@ pub type Message(item) {
   Start(List(crawl.Effect))
   Reported(
     scoop: frontier.Scoop,
-    report: Result(page.Report(item), page.FetchError),
+    report: Result(page.Report(item), page.HttpError),
   )
   FetcherDown(origin: origin.Origin)
   Wake
@@ -110,7 +113,7 @@ fn handle_message(
 
     FetcherDown(origin) -> {
       let #(crawl, effects) =
-        crawl.update(coordinator.crawl, crawl.Crashed(origin), now)
+        crawl.update(coordinator.crawl, crawl.Failed(origin, option.None), now)
       Coordinator(..coordinator, crawl:)
       |> execute(effects, now)
     }
@@ -156,9 +159,18 @@ fn handle_message(
               |> execute(effects, now)
             }
           }
-        Error(_) -> {
+        Error(fetch_err) -> {
+          let delay_ms = case fetch_err {
+            page.Throttled(retry_after) -> retry_after
+            _ -> option.None
+          }
+
           let #(crawl, effects) =
-            crawl.update(coordinator.crawl, crawl.Failed(scoop.origin), now)
+            crawl.update(
+              coordinator.crawl,
+              crawl.Failed(scoop.origin, delay_ms),
+              now,
+            )
           Coordinator(..coordinator, crawl:)
           |> execute(effects, now)
         }
@@ -213,8 +225,8 @@ fn execute(
               }
             }
           }
-          Error(_) -> {
-            Error(page.PolicyUnavailable)
+          Error(err) -> {
+            Error(err)
             |> Reported(scoop:, report: _)
             |> process.send(coordinator_subject, _)
           }
@@ -235,29 +247,60 @@ fn do_fetch(
   scoop: frontier.Scoop,
   user_agent: String,
   fetch: fn(request.Request(String)) ->
-    Result(response.Response(String), page.FetchError),
+    Result(response.Response(String), page.HttpError),
   next: fn(response.Response(String)) -> List(uri.Uri),
   on_page: fn(page.Page) -> page.Outcome(item),
-) -> Result(page.Outcome(item), page.FetchError) {
+) -> Result(page.Outcome(item), page.HttpError) {
   use request <- result.try(build_request(scoop.url, user_agent))
   use response <- result.try(fetch(request))
-  page.Page(
-    url: scoop.url,
-    status: response.status,
-    body: response.body,
-    candidates: next(response),
-  )
-  |> on_page()
-  |> Ok
+  case response.status {
+    429 | 503 -> {
+      response.get_header(response, "retry-after")
+      |> result.try(parse_retry_after)
+      |> option.from_result()
+      |> page.Throttled
+      |> Error
+    }
+    _ ->
+      page.Page(
+        url: scoop.url,
+        status: response.status,
+        body: response.body,
+        candidates: next(response),
+      )
+      |> on_page()
+      |> Ok
+  }
+}
+
+fn parse_retry_after(value: String) -> Result(Int, Nil) {
+  let value = string.trim(value)
+  parse_delay(value)
+  |> result.lazy_or(fn() { parse_http_date(value) })
+}
+
+fn parse_delay(value: String) -> Result(Int, Nil) {
+  case int.parse(value) {
+    Ok(delay) if delay >= 0 -> Ok(delay)
+    _ -> Error(Nil)
+  }
+}
+
+fn parse_http_date(value: String) -> Result(Int, Nil) {
+  use at <- result.map(timestamp.parse_http_date(value))
+  timestamp.system_time()
+  |> timestamp.difference(at)
+  |> duration.to_milliseconds()
+  |> int.max(0)
 }
 
 fn build_request(
   url: uri.Uri,
   user_agent: String,
-) -> Result(request.Request(String), page.FetchError) {
+) -> Result(request.Request(String), page.HttpError) {
   use request <- result.try(
     request.from_uri(url)
-    |> result.replace_error(page.InvalidUrl(url)),
+    |> result.replace_error(page.BadRequest),
   )
   Ok(request.set_header(request, "user-agent", user_agent))
 }
@@ -282,7 +325,7 @@ fn resolve_url(from: uri.Uri, link: uri.Uri) -> Result(uri.Uri, Nil) {
 
 fn filter_by_prefetch(
   outcome: page.Outcome(item),
-  prefetch: fn(uri.Uri) -> Result(uri.Uri, page.FetchError),
+  prefetch: fn(uri.Uri) -> Result(uri.Uri, Nil),
 ) -> page.Outcome(item) {
   let candidates =
     outcome.candidates

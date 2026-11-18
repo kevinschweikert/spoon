@@ -18,6 +18,7 @@ gleam_stdlib = {git = "https://github.com/gleam-lang/stdlib", ref = "main"}
 grip = {git = "https://tangled.org/kevinschweikert.de/grip", ref = "main"}
 gleam_deque = ">= 1.0.0 and < 2.0.0"
 gleam_time = ">= 1.11.0 and < 2.0.0"
+logging = ">= 1.5.0 and < 2.0.0"
 
 [dev_dependencies]
 gleeunit = ">= 1.0.0 and < 2.0.0"

@@ -32,9 +32,8 @@ pub type Message {
     crawl_delay_ms: option.Option(Int),
     links: List(uri.Uri),
   )
-  Failed(origin: Origin)
+  Failed(origin: Origin, retry_after: option.Option(Int))
   Skipped(origin: Origin)
-  Crashed(origin: Origin)
   AfterWake
 }
 
@@ -66,16 +65,15 @@ pub fn update(crawl: Crawl, msg: Message, now: Int) -> #(Crawl, List(Effect)) {
           |> next(now)
         }
       }
-    Failed(origin:) -> crawl |> settle(origin, option.None, now) |> next(now)
     Skipped(origin:) ->
       crawl |> settle(origin, option.Some(0), now) |> next(now)
-    Crashed(origin:) ->
+    Failed(origin:, retry_after:) ->
       case frontier.in_flight_for(crawl.frontier, origin) {
         option.Some(scoop) if scoop.attempts + 1 < crawl.settings.max_attempts -> {
           crawl
-          |> requeue(origin, now)
+          |> requeue(origin, retry_after, now)
         }
-        option.Some(_) -> crawl |> penalize(origin, now)
+        option.Some(_) -> crawl |> penalize(origin, retry_after, now)
         option.None -> crawl
       }
       |> next(now)
@@ -124,19 +122,29 @@ fn settle(
   )
 }
 
-fn requeue(crawl: Crawl, origin: Origin, now: Int) {
+fn requeue(
+  crawl: Crawl,
+  origin: Origin,
+  delay_ms: option.Option(Int),
+  now: Int,
+) {
   Crawl(
     ..crawl,
     frontier: frontier.requeue(
       crawl.frontier,
       origin,
-      crawl.settings.delay_ms,
+      option.unwrap(delay_ms, crawl.settings.delay_ms),
       now,
     ),
   )
 }
 
-fn penalize(crawl: Crawl, origin: Origin, now: Int) -> Crawl {
+fn penalize(
+  crawl: Crawl,
+  origin: Origin,
+  delay_ms: option.Option(Int),
+  now: Int,
+) -> Crawl {
   Crawl(
     ..crawl,
     frontier: frontier.penalize(
@@ -144,7 +152,7 @@ fn penalize(crawl: Crawl, origin: Origin, now: Int) -> Crawl {
       origin,
       crawl.settings.delay_ms,
       now,
-      option.None,
+      delay_ms,
     ),
   )
 }

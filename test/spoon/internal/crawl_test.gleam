@@ -54,7 +54,11 @@ fn succeeded(
 }
 
 fn failed(text: String) -> crawl.Message {
-  crawl.Failed(origin_of(text))
+  crawl.Failed(origin_of(text), option.None)
+}
+
+fn throttled(text: String, delay_ms: Int) -> crawl.Message {
+  crawl.Failed(origin_of(text), option.Some(delay_ms))
 }
 
 fn skipped(text: String) -> crawl.Message {
@@ -137,7 +141,8 @@ pub fn a_link_already_seen_is_not_fetched_again_test() {
   assert effects == [crawl.Done]
 }
 
-pub fn a_failed_fetch_still_cools_the_origin_test() {
+pub fn a_failed_fetch_is_retried_before_other_queued_urls_test() {
+  let retry = frontier.Scoop(..scoop("https://a.example/"), attempts: 1)
   let #(state, started) =
     crawl.new(
       settings_with(["https://a.example/", "https://a.example/second"]),
@@ -146,20 +151,32 @@ pub fn a_failed_fetch_still_cools_the_origin_test() {
   let #(state, failed_effects) =
     state
     |> crawl.update(failed("https://a.example/"), 100)
-  let #(state, woken) =
+  let #(_, woken) =
     state
     |> crawl.update(crawl.AfterWake, 1100)
-  let #(_, finished) =
-    state
-    |> crawl.update(
-      succeeded("https://a.example/second", [], option.None),
-      1200,
-    )
 
   assert started == [fetch("https://a.example/")]
   assert failed_effects == [crawl.Wake(at: 1100)]
-  assert woken == [fetch("https://a.example/second")]
-  assert finished == [crawl.Done]
+  assert woken == [crawl.Fetch(retry)]
+}
+
+pub fn a_failed_fetch_with_throttle_overrides_default_test() {
+  let retry = frontier.Scoop(..scoop("https://a.example/"), attempts: 1)
+  let #(state, started) =
+    crawl.new(
+      settings_with(["https://a.example/", "https://a.example/second"]),
+      0,
+    )
+  let #(state, failed_effects) =
+    state
+    |> crawl.update(throttled("https://a.example/", 2000), 100)
+  let #(_, woken) =
+    state
+    |> crawl.update(crawl.AfterWake, 2100)
+
+  assert started == [fetch("https://a.example/")]
+  assert failed_effects == [crawl.Wake(at: 2100)]
+  assert woken == [crawl.Fetch(retry)]
 }
 
 pub fn a_reported_crawl_delay_sets_the_cooldown_test() {
@@ -291,7 +308,7 @@ pub fn a_crash_report_after_a_clean_exit_changes_nothing_test() {
     |> crawl.update(succeeded("https://a.example/", [], option.None), 100)
   let #(_, down) =
     state
-    |> crawl.update(crawl.Crashed(a_origin), 100)
+    |> crawl.update(crawl.Failed(a_origin, option.None), 100)
 
   assert reported == []
   assert down == []
@@ -303,7 +320,7 @@ pub fn a_crashed_fetch_is_retried_after_the_cooldown_test() {
   let #(state, _) = crawl.new(settings_with(["https://a.example/"]), 0)
   let #(state, crashed) =
     state
-    |> crawl.update(crawl.Crashed(a_origin), 100)
+    |> crawl.update(crawl.Failed(a_origin, option.None), 100)
   let #(_, retried) =
     state
     |> crawl.update(crawl.AfterWake, 1100)
@@ -359,19 +376,19 @@ pub fn a_page_that_crashes_three_times_is_dropped_test() {
   let #(state, _) = crawl.new(settings_with(["https://a.example/"]), 0)
   let #(state, after_first_crash) =
     state
-    |> crawl.update(crawl.Crashed(a_origin), 100)
+    |> crawl.update(crawl.Failed(a_origin, option.None), 100)
   let #(state, first_attempt_again) =
     state
     |> crawl.update(crawl.AfterWake, 1100)
   let #(state, after_second_crash) =
     state
-    |> crawl.update(crawl.Crashed(a_origin), 1100)
+    |> crawl.update(crawl.Failed(a_origin, option.None), 1100)
   let #(state, second_attempt_again) =
     state
     |> crawl.update(crawl.AfterWake, 2100)
   let #(_, after_third_crash) =
     state
-    |> crawl.update(crawl.Crashed(a_origin), 2100)
+    |> crawl.update(crawl.Failed(a_origin, option.None), 2100)
 
   assert after_first_crash == [crawl.Wake(at: 1100)]
   assert first_attempt_again == [crawl.Fetch(first_retry)]

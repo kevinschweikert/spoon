@@ -10,6 +10,7 @@ import gleam/result
 import gleam/string
 import gleam/uri
 import grip/origin
+import logging
 import spoon/internal/policy_cache
 import spoon/internal/worker
 
@@ -94,7 +95,7 @@ pub fn on_page(
 /// not.
 pub fn prefetch(
   builder: Builder(a),
-  prefetch: fn(uri.Uri) -> Result(uri.Uri, page.FetchError),
+  prefetch: fn(uri.Uri) -> Result(uri.Uri, Nil),
 ) -> Builder(a) {
   Builder(config.Config(..builder.config, prefetch:))
 }
@@ -232,14 +233,22 @@ fn default_next(resp: response.Response(String)) -> List(uri.Uri) {
 
 fn default_fetch(
   request: request.Request(String),
-) -> Result(response.Response(String), page.FetchError) {
+) -> Result(response.Response(String), page.HttpError) {
   // TODO: make the max size and redirect behaviour configurable by the user
   httpc.configure()
   |> httpc.follow_redirects(False)
   |> httpc.timeout(5000)
   |> httpc.max_body_size(httpc.Bytes(10 * 1024 * 1024))
   |> httpc.dispatch(request)
-  |> result.replace_error(page.FetchError)
+  |> result.map_error(fn(err) {
+    case err {
+      httpc.InvalidUtf8Response -> page.BadResponse
+      httpc.FailedToConnect(..) -> page.Network
+      httpc.ResponseTimeout -> page.Network
+      httpc.ResponseHeaderTooLarge -> page.BadRequest
+      httpc.ResponseBodyTooLarge -> page.BadResponse
+    }
+  })
 }
 
 fn start_supervision_tree(
@@ -251,6 +260,8 @@ fn start_supervision_tree(
   initial: acc,
   combine: fn(acc, item) -> acc,
 ) -> StartResult(_) {
+  logging.configure()
+
   supervisor.new(supervisor.RestForOne)
   |> supervisor.add(worker.supervised(worker_name))
   |> supervisor.add(policy_cache.supervised(

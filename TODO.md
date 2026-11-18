@@ -4,10 +4,8 @@ I know this is LLM generated but this is my way of brainstorming and keeping tra
 
 ## Now: finish origin-keyed scheduling
 
-- [ ] One `settle` path for `Throttled`: 429/503 and grip's rate-limited robots error
-- [ ] `next_at` pushed back by `Retry-After`, else exponential via `failures`
-- [ ] Retry `Timeout`, `Network`, 429 and 5xx up to `max_attempts` through `requeue`
-- [ ] A crash reports `Failed(Crashed)` once, no requeue
+- [ ] `BadRequest` is the one non-retryable case, and temporary: disappears once `RequestUrl` removes malformed-URL errors from `fetch` entirely
+- [ ] `RequestUrl`: opaque wrapper guaranteeing scheme http/https + host, smart-constructed once where candidates are resolved, replacing the `keep_requestable` scheme/host recheck; kept distinct from grip's `Origin`, no coupling
 - [ ] `spoon.respect_robots(Bool)`, default `True`
 
 Checkpoint: a 429-ing origin slows exponentially while others continue, on the stepped clock.

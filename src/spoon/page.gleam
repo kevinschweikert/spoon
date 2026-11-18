@@ -14,9 +14,9 @@ pub type Report(item) {
   Skipped
 }
 
-pub type FetchError {
-  PrefetchRefused
-  FetchError
-  InvalidUrl(uri.Uri)
-  PolicyUnavailable
+pub type HttpError {
+  Throttled(retry_after_ms: option.Option(Int))
+  BadRequest
+  BadResponse
+  Network
 }

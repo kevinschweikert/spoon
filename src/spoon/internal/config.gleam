@@ -13,9 +13,9 @@ pub type Config(item) {
     base_url: uri.Uri,
     seeds: List(uri.Uri),
     fetch: fn(request.Request(String)) ->
-      Result(response.Response(String), page.FetchError),
+      Result(response.Response(String), page.HttpError),
     on_page: fn(page.Page) -> page.Outcome(item),
-    prefetch: fn(uri.Uri) -> Result(uri.Uri, page.FetchError),
+    prefetch: fn(uri.Uri) -> Result(uri.Uri, Nil),
     next: fn(response.Response(String)) -> List(uri.Uri),
     max_pages: Int,
     max_concurrency: Int,

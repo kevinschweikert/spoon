@@ -3,6 +3,7 @@ import gleam/erlang/process
 import gleam/float
 import gleam/http/request
 import gleam/http/response
+import gleam/int
 import gleam/list
 import gleam/option
 import gleam/order
@@ -11,8 +12,10 @@ import gleam/otp/supervision
 import gleam/result
 import gleam/time/duration
 import gleam/time/timestamp
+import gleam/uri
 import grip
 import grip/origin
+import logging
 import spoon/internal/config
 import spoon/internal/frontier
 import spoon/internal/worker
@@ -21,7 +24,7 @@ import spoon/page
 type Waiting {
   Waiting(
     scoop: frontier.Scoop,
-    reply: process.Subject(Result(PolicyAnswer, Nil)),
+    reply: process.Subject(Result(PolicyAnswer, page.HttpError)),
   )
 }
 
@@ -48,9 +51,9 @@ type Lookup {
 pub type Message {
   Check(
     scoop: frontier.Scoop,
-    reply: process.Subject(Result(PolicyAnswer, Nil)),
+    reply: process.Subject(Result(PolicyAnswer, page.HttpError)),
   )
-  Policy(origin: origin.Origin, policy: Result(grip.Policy, Nil))
+  Policy(origin: origin.Origin, policy: Result(grip.Policy, page.HttpError))
 }
 
 pub type PolicyAnswer {
@@ -92,17 +95,27 @@ fn handle_message(
       let waiting = Waiting(scoop:, reply:)
       case lookup(cache, scoop) {
         Fresh(policy) -> {
-          answer(waiting, Ok(policy), cache.config.user_agent)
+          policy
+          |> apply_scoop(scoop, cache.config.user_agent)
+          |> Ok
+          |> process.send(reply, _)
           actor.continue(cache)
         }
         Pending -> cache |> add_pending(waiting) |> actor.continue
         Stale -> {
+          // TODO: remove logging dependency before release
+          logging.log(
+            logging.Debug,
+            "[POLICY] Fetching "
+              <> origin.robots_url(scoop.origin) |> uri.to_string(),
+          )
           spawn_fetch(
             cache.name,
             cache.workers,
             cache.config.fetch,
             scoop.origin,
           )
+
           cache |> add_pending(waiting) |> actor.continue
         }
       }
@@ -112,31 +125,25 @@ fn handle_message(
       cache.pending
       |> dict.get(origin)
       |> result.unwrap([])
-      |> list.each(answer(_, policy, user_agent))
+      |> list.each(fn(waiting) {
+        policy
+        |> result.map(apply_scoop(_, waiting.scoop, user_agent))
+        |> process.send(waiting.reply, _)
+      })
 
       let policies = case policy {
-        Ok(policy) ->
+        Ok(policy) -> {
           dict.insert(
             cache.policies,
             origin,
             Entry(policy:, fetched_at: timestamp.system_time()),
           )
+        }
         Error(_) -> cache.policies
       }
       Cache(..cache, policies:, pending: dict.delete(cache.pending, origin))
       |> actor.continue
     }
-  }
-}
-
-fn answer(
-  waiting: Waiting,
-  policy: Result(grip.Policy, Nil),
-  user_agent: String,
-) -> Nil {
-  case policy {
-    Ok(policy) -> resolve(policy, user_agent, waiting.scoop, waiting.reply)
-    Error(_) -> process.send(waiting.reply, Error(Nil))
   }
 }
 
@@ -158,10 +165,10 @@ fn lookup(cache: Cache(item), scoop: frontier.Scoop) -> Lookup {
 }
 
 fn spawn_fetch(
-  name: _,
-  worker_name: _,
+  name: process.Name(Message),
+  worker_name: process.Name(worker.Message),
   fetch: fn(request.Request(String)) ->
-    Result(response.Response(String), page.FetchError),
+    Result(response.Response(String), page.HttpError),
   origin: origin.Origin,
 ) -> Nil {
   let subject = process.named_subject(name)
@@ -175,7 +182,8 @@ fn spawn_fetch(
         |> process.send(subject, _)
       },
       on_error: fn(_reason) {
-        Policy(origin:, policy: Error(Nil))
+        Error(page.BadResponse)
+        |> Policy(origin:, policy: _)
         |> process.send(subject, _)
       },
     ),
@@ -198,25 +206,50 @@ fn is_fresh(fetched_at: timestamp.Timestamp) -> Bool {
 
 fn fetch_robots(
   fetch: fn(request.Request(String)) ->
-    Result(response.Response(String), page.FetchError),
+    Result(response.Response(String), page.HttpError),
   origin: origin.Origin,
-) -> Result(grip.Policy, Nil) {
-  use request <- result.try(origin.robots_url(origin) |> request.from_uri)
-  use response <- result.try(fetch(request) |> result.replace_error(Nil))
-  grip.from_response(response) |> result.replace_error(Nil)
+) -> Result(grip.Policy, page.HttpError) {
+  let robots_url = origin.robots_url(origin)
+  use request <- result.try(
+    request.from_uri(robots_url) |> result.replace_error(page.BadRequest),
+  )
+  use response <- result.try(
+    fetch(request) |> result.replace_error(page.BadResponse),
+  )
+  grip.from_response(response)
+  |> result.map_error(from_grip)
 }
 
-fn resolve(
+fn from_grip(grip_err: grip.Error) -> page.HttpError {
+  case grip_err {
+    grip.RateLimited(retry_after:) -> {
+      retry_after
+      |> option.map(fn(kind) {
+        case kind {
+          grip.Delay(seconds:) -> seconds * 1000
+          grip.At(timestamp:) ->
+            timestamp.system_time()
+            |> timestamp.difference(timestamp)
+            |> duration.to_milliseconds()
+            |> int.max(0)
+        }
+      })
+      |> page.Throttled
+    }
+    grip.UnexpectedHttpStatusCode(_) -> page.BadResponse
+  }
+}
+
+fn apply_scoop(
   policy: grip.Policy,
-  user_agent: String,
   scoop: frontier.Scoop,
-  reply: process.Subject(Result(PolicyAnswer, Nil)),
-) -> Nil {
+  user_agent: String,
+) -> PolicyAnswer {
   let allowed = grip.is_allowed(policy, user_agent, scoop.url)
   let delay_ms =
     grip.rate(policy, user_agent)
     |> result.map(fn(rate) { float.round(grip.interval(rate) *. 1000.0) })
     |> option.from_result
 
-  process.send(reply, Ok(PolicyAnswer(allowed, delay_ms)))
+  PolicyAnswer(allowed, delay_ms)
 }
