@@ -1,6 +1,5 @@
 import gleam/http/request
 import gleam/http/response
-import gleam/uri
 import spoon/internal/requestable
 import spoon/page
 
@@ -16,7 +15,7 @@ pub type Config(item) {
     fetch: fn(request.Request(String)) ->
       Result(response.Response(String), page.HttpError),
     on_page: fn(page.Page) -> page.Outcome(item),
-    next: fn(response.Response(String)) -> List(uri.Uri),
+    next: fn(response.Response(String)) -> List(page.Link),
     max_pages: Int,
     max_concurrency: Int,
     user_agent: String,

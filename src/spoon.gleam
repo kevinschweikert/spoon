@@ -116,7 +116,7 @@ pub fn on_page(
 /// their `href` attributes.
 pub fn next(
   builder: Builder(item),
-  next: fn(response.Response(String)) -> List(uri.Uri),
+  next: fn(response.Response(String)) -> List(page.Link),
 ) -> Builder(item) {
   Builder(config.Config(..builder.config, next:))
 }
@@ -225,7 +225,7 @@ fn default_on_page(page: page.Page) -> page.Outcome(Nil) {
   page.Outcome(item: Nil, candidates: page.candidates)
 }
 
-fn default_next(resp: response.Response(String)) -> List(uri.Uri) {
+fn default_next(resp: response.Response(String)) -> List(page.Link) {
   use resp <- middleware.redirect(resp)
   use resp <- middleware.content_type(
     ["text/html", "text/plain", "application/xml"],

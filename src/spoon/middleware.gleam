@@ -34,26 +34,26 @@ pub fn status_ok(
 
 pub fn redirect(
   resp: response.Response(String),
-  handle: fn(response.Response(String)) -> List(uri.Uri),
-) -> List(uri.Uri) {
+  handle: fn(response.Response(String)) -> List(page.Link),
+) -> List(page.Link) {
   case resp.status >= 300 && resp.status < 400 {
     True -> redirect_links(resp)
     False -> handle(resp)
   }
 }
 
-fn redirect_links(resp: response.Response(String)) -> List(uri.Uri) {
+fn redirect_links(resp: response.Response(String)) -> List(page.Link) {
   response.get_header(resp, "location")
   |> result.try(uri.parse)
-  |> result.map(fn(target) { [target] })
+  |> result.map(fn(target) { [page.Link(url: target, nofollow: False)] })
   |> result.unwrap([])
 }
 
 pub fn content_type(
   mime_types: List(String),
   resp: response.Response(String),
-  handle: fn(response.Response(String)) -> List(uri.Uri),
-) -> List(uri.Uri) {
+  handle: fn(response.Response(String)) -> List(page.Link),
+) -> List(page.Link) {
   case response.get_header(resp, "content-type") {
     Ok(content_type) ->
       case list.any(mime_types, string.starts_with(content_type, _)) {
@@ -64,7 +64,7 @@ pub fn content_type(
   }
 }
 
-pub fn anchors(body: String) -> List(uri.Uri) {
+pub fn anchors(body: String) -> List(page.Link) {
   let anchors =
     [soup.with_tag("a")]
     |> soup.elements()
@@ -74,9 +74,12 @@ pub fn anchors(body: String) -> List(uri.Uri) {
 
   use anchor <- list.filter_map(anchors)
   let attributes = dict.from_list(anchor)
+  use href <- result.try(dict.get(attributes, "href"))
+  use url <- result.try(uri.parse(href))
+  let link = page.Link(url:, nofollow: False)
   case dict.get(attributes, "rel") |> result.map(is_nofollow) {
-    Ok(True) -> Error(Nil)
-    _ -> dict.get(attributes, "href") |> result.try(uri.parse)
+    Ok(True) -> Ok(page.Link(..link, nofollow: True))
+    _ -> Ok(link)
   }
 }
 

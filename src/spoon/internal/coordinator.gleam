@@ -1,3 +1,4 @@
+import gleam/dict
 import gleam/erlang/process
 import gleam/http/request
 import gleam/http/response
@@ -10,8 +11,8 @@ import gleam/result
 import gleam/string
 import gleam/time/duration
 import gleam/time/timestamp
-import gleam/uri
 import grip/origin
+import presentable_soup as soup
 import spoon/internal/config
 import spoon/internal/crawl
 import spoon/internal/frontier
@@ -123,29 +124,14 @@ fn handle_message(
       case report {
         Ok(report) ->
           case report {
+            page.Noindex(candidates:, crawl_delay_ms:) -> {
+              advance(coordinator, scoop, candidates, crawl_delay_ms, now)
+            }
             page.Fetched(outcome:, crawl_delay_ms:) -> {
               let accumulator =
                 coordinator.combine(coordinator.accumulator, outcome.item)
-              let links =
-                outcome.candidates
-                |> list.filter_map(requestable.resolve(scoop.requestable, _))
-                |> filter_by_scope(coordinator.config.scope)
-
-              let #(crawl, effects) =
-                crawl.update(
-                  coordinator.crawl,
-                  crawl.Fetched(
-                    origin: scoop.requestable.origin,
-                    crawl_delay_ms: option.or(
-                      crawl_delay_ms,
-                      option.Some(coordinator.config.delay_ms),
-                    ),
-                    links:,
-                  ),
-                  now,
-                )
-              Coordinator(..coordinator, crawl:, accumulator:)
-              |> execute(effects, now)
+              Coordinator(..coordinator, accumulator:)
+              |> advance(scoop, outcome.candidates, crawl_delay_ms, now)
             }
             page.Skipped -> {
               let #(crawl, effects) =
@@ -158,8 +144,8 @@ fn handle_message(
               |> execute(effects, now)
             }
           }
-        Error(fetch_err) -> {
-          let delay_ms = case fetch_err {
+        Error(http_err) -> {
+          let delay_ms = case http_err {
             page.Throttled(retry_after) -> retry_after
             _ -> option.None
           }
@@ -182,6 +168,38 @@ fn handle_message(
       |> execute(effects, now)
     }
   }
+}
+
+fn advance(
+  coordinator: Coordinator(item, acc),
+  scoop: frontier.Scoop,
+  links: List(page.Link),
+  crawl_delay_ms: option.Option(Int),
+  now: Int,
+) -> actor.Next(Coordinator(item, acc), Message(item)) {
+  let links =
+    links
+    |> list.filter(page.is_crawlable)
+    |> list.filter_map(fn(link) {
+      requestable.resolve(scoop.requestable, link.url)
+    })
+    |> filter_by_scope(coordinator.config.scope)
+
+  let #(crawl, effects) =
+    crawl.update(
+      coordinator.crawl,
+      crawl.Fetched(
+        origin: scoop.requestable.origin,
+        crawl_delay_ms: option.or(
+          crawl_delay_ms,
+          option.Some(coordinator.config.delay_ms),
+        ),
+        links:,
+      ),
+      now,
+    )
+  Coordinator(..coordinator, crawl:)
+  |> execute(effects, now)
 }
 
 fn execute(
@@ -227,8 +245,25 @@ fn execute(
                 |> process.send(coordinator_subject, _)
               }
               True -> {
-                do_fetch(scoop, user_agent, fetch, next, on_page)
-                |> result.map(page.Fetched(_, delay_ms))
+                do_fetch(scoop, user_agent, fetch)
+                |> result.map(fn(response) {
+                  case http_ok(response.status) && is_noindex(response.body) {
+                    True ->
+                      page.Noindex(
+                        candidates: next(response),
+                        crawl_delay_ms: delay_ms,
+                      )
+                    False ->
+                      page.Page(
+                        url: requestable.to_uri(scoop.requestable),
+                        status: response.status,
+                        body: response.body,
+                        candidates: next(response),
+                      )
+                      |> on_page()
+                      |> page.Fetched(delay_ms)
+                  }
+                })
                 |> Reported(scoop:, report: _)
                 |> process.send(coordinator_subject, _)
               }
@@ -255,14 +290,16 @@ fn execute(
   }
 }
 
+fn http_ok(status: Int) -> Bool {
+  status >= 200 && status <= 299
+}
+
 fn do_fetch(
   scoop: frontier.Scoop,
   user_agent: String,
   fetch: fn(request.Request(String)) ->
     Result(response.Response(String), page.HttpError),
-  next: fn(response.Response(String)) -> List(uri.Uri),
-  on_page: fn(page.Page) -> page.Outcome(item),
-) -> Result(page.Outcome(item), page.HttpError) {
+) -> Result(response.Response(String), page.HttpError) {
   let request = requestable.to_request(scoop.requestable, user_agent)
   use response <- result.try(fetch(request))
   case response.status {
@@ -273,15 +310,25 @@ fn do_fetch(
       |> page.Throttled
       |> Error
     }
-    _ ->
-      page.Page(
-        url: requestable.to_uri(scoop.requestable),
-        status: response.status,
-        body: response.body,
-        candidates: next(response),
-      )
-      |> on_page()
-      |> Ok
+    _ -> Ok(response)
+  }
+}
+
+fn is_noindex(body: String) -> Bool {
+  let metas =
+    [soup.with_tag("meta")]
+    |> soup.elements()
+    |> soup.return(soup.attributes())
+    |> soup.scrape(body)
+    |> result.unwrap([])
+
+  use meta <- list.any(metas)
+  let attrs = dict.from_list(meta)
+  case dict.get(attrs, "name"), dict.get(attrs, "content") {
+    Ok(name), Ok(content) ->
+      string.trim(string.lowercase(name)) == "robots"
+      && string.contains(string.lowercase(content), "noindex")
+    _, _ -> False
   }
 }
 
