@@ -12,8 +12,7 @@ gleam_http = ">= 4.5.0 and < 5.0.0"
 # use hex managed when > 5.0.0 is released
 gleam_httpc = {git = "https://github.com/kevinschweikert/httpc", ref="feat/max-size-options"}
 gleam_erlang = ">= 1.3.0 and < 2.0.0"
-# use hex managed when > 1.0.5 is released
-gleam_stdlib = {git = "https://github.com/gleam-lang/stdlib", ref = "main"}
+gleam_stdlib = ">= 1.1.0 and < 2.0.0"
 # use hex managed when 1.0.0 is released
 grip = {git = "https://tangled.org/kevinschweikert.de/grip", ref = "main"}
 gleam_deque = ">= 1.0.0 and < 2.0.0"

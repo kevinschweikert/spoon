@@ -2,13 +2,13 @@ import gleam/bool
 import gleam/list
 import gleam/option
 import gleam/set
-import gleam/uri
 import grip/origin.{type Origin}
 import spoon/internal/frontier
+import spoon/internal/requestable
 
 pub type Settings {
   Settings(
-    seeds: List(uri.Uri),
+    seeds: List(requestable.Requestable),
     delay_ms: Int,
     max_concurrency: Int,
     max_pages: Int,
@@ -20,7 +20,9 @@ pub type Crawl {
   Crawl(
     settings: Settings,
     // NOTE: maybe a bloom filter or ETS table will be necessary
-    seen: set.Set(uri.Uri),
+    // Also before doing that, think about doing `requestable.to_uri |> uri.to_string`
+    // to have a binary lookup instead of this nested data structure
+    seen: set.Set(requestable.Requestable),
     frontier: frontier.Frontier,
     requests: Int,
   )
@@ -30,7 +32,7 @@ pub type Message {
   Fetched(
     origin: Origin,
     crawl_delay_ms: option.Option(Int),
-    links: List(uri.Uri),
+    links: List(requestable.Requestable),
   )
   Failed(origin: Origin, retry_after: option.Option(Int))
   Skipped(origin: Origin)
@@ -86,21 +88,24 @@ fn increment_request(crawl: Crawl) -> Crawl {
   Crawl(..crawl, requests: crawl.requests + 1)
 }
 
-fn push_links(crawl: Crawl, links: List(uri.Uri), now: Int) -> Crawl {
-  list.fold(links, crawl, fn(crawl, url) {
-    let url = normalize(url)
-    case set.contains(crawl.seen, url), origin.from_uri(url) {
-      False, Ok(site) ->
+fn push_links(
+  crawl: Crawl,
+  links: List(requestable.Requestable),
+  now: Int,
+) -> Crawl {
+  list.fold(links, crawl, fn(crawl, requestable) {
+    case set.contains(crawl.seen, requestable) {
+      False ->
         Crawl(
           ..crawl,
-          seen: set.insert(crawl.seen, url),
+          seen: set.insert(crawl.seen, requestable),
           frontier: frontier.push(
             crawl.frontier,
-            frontier.new_scoop(site, url),
+            frontier.new_scoop(requestable),
             now,
           ),
         )
-      _, _ -> crawl
+      _ -> crawl
     }
   })
 }
@@ -192,13 +197,4 @@ fn capacity_reached(crawl: Crawl) -> Bool {
   let in_flight = frontier.in_flight(crawl.frontier)
   in_flight >= crawl.settings.max_concurrency
   || crawl.requests + in_flight >= crawl.settings.max_pages
-}
-
-fn normalize(url: uri.Uri) -> uri.Uri {
-  let path = case url.path {
-    "" -> "/"
-    path -> path
-  }
-
-  uri.Uri(..url, path:, fragment: option.None)
 }

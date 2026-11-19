@@ -4,9 +4,7 @@ I know this is LLM generated but this is my way of brainstorming and keeping tra
 
 ## Now: finish origin-keyed scheduling
 
-- [ ] `BadRequest` is the one non-retryable case, and temporary: disappears once `RequestUrl` removes malformed-URL errors from `fetch` entirely
-- [ ] `RequestUrl`: opaque wrapper guaranteeing scheme http/https + host, smart-constructed once where candidates are resolved, replacing the `keep_requestable` scheme/host recheck; kept distinct from grip's `Origin`, no coupling
-- [ ] `spoon.respect_robots(Bool)`, default `True`
+- [x] `spoon.respect_robots(Bool)`, default `True`
 
 Checkpoint: a 429-ing origin slows exponentially while others continue, on the stepped clock.
 

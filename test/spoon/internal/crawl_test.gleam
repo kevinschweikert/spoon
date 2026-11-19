@@ -5,6 +5,7 @@ import gleam/uri
 import grip/origin
 import spoon/internal/crawl
 import spoon/internal/frontier
+import spoon/internal/requestable
 
 const delay = 1000
 
@@ -18,8 +19,13 @@ fn origin_of(text: String) -> origin.Origin {
   found
 }
 
+fn req(text: String) -> requestable.Requestable {
+  let assert Ok(found) = requestable.from_uri(url(text))
+  found
+}
+
 fn scoop(text: String) -> frontier.Scoop {
-  frontier.Scoop(url: url(text), depth: 0, attempts: 0, origin: origin_of(text))
+  frontier.new_scoop(req(text))
 }
 
 fn fetch(text: String) -> crawl.Effect {
@@ -29,7 +35,8 @@ fn fetch(text: String) -> crawl.Effect {
 fn fetched_urls(effects: List(crawl.Effect)) -> List(String) {
   list.filter_map(effects, fn(effect) {
     case effect {
-      crawl.Fetch(fetched) -> Ok(uri.to_string(fetched.url))
+      crawl.Fetch(fetched) ->
+        Ok(fetched.requestable |> requestable.to_uri |> uri.to_string)
       _ -> Error(Nil)
     }
   })
@@ -37,7 +44,7 @@ fn fetched_urls(effects: List(crawl.Effect)) -> List(String) {
 
 fn settings_with(seeds: List(String)) -> crawl.Settings {
   crawl.Settings(
-    seeds: list.map(seeds, url),
+    seeds: list.map(seeds, req),
     delay_ms: delay,
     max_concurrency: 10,
     max_pages: 100,
@@ -50,7 +57,7 @@ fn succeeded(
   links: List(String),
   crawl_delay_ms: option.Option(Int),
 ) -> crawl.Message {
-  crawl.Fetched(origin_of(text), crawl_delay_ms, list.map(links, url))
+  crawl.Fetched(origin_of(text), crawl_delay_ms, list.map(links, req))
 }
 
 fn failed(text: String) -> crawl.Message {

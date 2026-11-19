@@ -3,11 +3,11 @@ import gleam/deque
 import gleam/dict
 import gleam/int
 import gleam/option
-import gleam/uri
 import grip/origin.{type Origin}
+import spoon/internal/requestable
 
 pub type Scoop {
-  Scoop(url: uri.Uri, depth: Int, attempts: Int, origin: Origin)
+  Scoop(requestable: requestable.Requestable, depth: Int, attempts: Int)
 }
 
 pub type Slot {
@@ -35,8 +35,8 @@ pub type Popped {
   Empty
 }
 
-pub fn new_scoop(origin: Origin, url: uri.Uri) -> Scoop {
-  Scoop(url:, depth: 0, attempts: 0, origin:)
+pub fn new_scoop(requestable: requestable.Requestable) -> Scoop {
+  Scoop(depth: 0, attempts: 0, requestable:)
 }
 
 pub fn new() -> Frontier {
@@ -85,17 +85,17 @@ fn is_better(best: option.Option(#(Origin, Slot, Scoop)), slot: Slot) -> Bool {
 }
 
 pub fn push(frontier: Frontier, scoop: Scoop, now: Int) -> Frontier {
-  case dict.get(frontier.slots, scoop.origin) {
+  case dict.get(frontier.slots, scoop.requestable.origin) {
     Ok(slot) ->
       Frontier(slots: dict.insert(
         frontier.slots,
-        scoop.origin,
+        scoop.requestable.origin,
         Slot(..slot, scoops: deque.push_back(slot.scoops, scoop)),
       ))
     Error(_) ->
       Frontier(slots: dict.insert(
         frontier.slots,
-        scoop.origin,
+        scoop.requestable.origin,
         Slot(
           scoops: deque.from_list([scoop]),
           in_flight: option.None,

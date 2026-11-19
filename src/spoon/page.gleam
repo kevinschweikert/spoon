@@ -9,6 +9,7 @@ pub type Outcome(item) {
   Outcome(item: item, candidates: List(uri.Uri))
 }
 
+@internal
 pub type Report(item) {
   Fetched(outcome: Outcome(item), crawl_delay_ms: option.Option(Int))
   Skipped
@@ -16,7 +17,6 @@ pub type Report(item) {
 
 pub type HttpError {
   Throttled(retry_after_ms: option.Option(Int))
-  BadRequest
   BadResponse
   Network
 }

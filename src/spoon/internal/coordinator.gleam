@@ -16,6 +16,7 @@ import spoon/internal/config
 import spoon/internal/crawl
 import spoon/internal/frontier
 import spoon/internal/policy_cache
+import spoon/internal/requestable
 
 // import spoon/internal/policy_cache
 import spoon/internal/worker
@@ -125,23 +126,21 @@ fn handle_message(
             page.Fetched(outcome:, crawl_delay_ms:) -> {
               let accumulator =
                 coordinator.combine(coordinator.accumulator, outcome.item)
-              let outcome =
-                outcome
-                |> resolve_candidates(scoop)
-                |> keep_requestable
-                |> filter_by_prefetch(coordinator.config.prefetch)
+              let links =
+                outcome.candidates
+                |> list.filter_map(requestable.resolve(scoop.requestable, _))
                 |> filter_by_scope(coordinator.config.scope)
 
               let #(crawl, effects) =
                 crawl.update(
                   coordinator.crawl,
                   crawl.Fetched(
-                    origin: scoop.origin,
+                    origin: scoop.requestable.origin,
                     crawl_delay_ms: option.or(
                       crawl_delay_ms,
                       option.Some(coordinator.config.delay_ms),
                     ),
-                    links: outcome.candidates,
+                    links:,
                   ),
                   now,
                 )
@@ -152,7 +151,7 @@ fn handle_message(
               let #(crawl, effects) =
                 crawl.update(
                   coordinator.crawl,
-                  crawl.Skipped(scoop.origin),
+                  crawl.Skipped(scoop.requestable.origin),
                   now,
                 )
               Coordinator(..coordinator, crawl:)
@@ -168,7 +167,7 @@ fn handle_message(
           let #(crawl, effects) =
             crawl.update(
               coordinator.crawl,
-              crawl.Failed(scoop.origin, delay_ms),
+              crawl.Failed(scoop.requestable.origin, delay_ms),
               now,
             )
           Coordinator(..coordinator, crawl:)
@@ -203,12 +202,22 @@ fn execute(
     [crawl.Fetch(scoop), ..rest] -> {
       let Coordinator(self: coordinator_subject, config:, policy_cache:, ..) =
         coordinator
-      let config.Config(fetch:, next:, on_page:, user_agent:, ..) = config
+      let config.Config(
+        fetch:,
+        next:,
+        on_page:,
+        user_agent:,
+        respect_robots:,
+        ..,
+      ) = config
       let fetcher = fn() {
-        let policy_answer =
-          process.call(process.named_subject(policy_cache), 10_000, fn(reply) {
-            policy_cache.Check(scoop:, reply:)
-          })
+        let policy_answer = case respect_robots {
+          True ->
+            process.call(process.named_subject(policy_cache), 10_000, fn(reply) {
+              policy_cache.Check(scoop:, reply:)
+            })
+          False -> Ok(policy_cache.PolicyAnswer(True, option.None))
+        }
         case policy_answer {
           Ok(policy_cache.PolicyAnswer(allowed:, delay_ms:)) -> {
             case allowed {
@@ -234,7 +243,10 @@ fn execute(
       }
       let job =
         worker.Job(run: fetcher, on_error: fn(_reason) {
-          process.send(coordinator_subject, FetcherDown(origin: scoop.origin))
+          process.send(
+            coordinator_subject,
+            FetcherDown(origin: scoop.requestable.origin),
+          )
         })
 
       worker.start_job(coordinator.workers, job)
@@ -251,7 +263,7 @@ fn do_fetch(
   next: fn(response.Response(String)) -> List(uri.Uri),
   on_page: fn(page.Page) -> page.Outcome(item),
 ) -> Result(page.Outcome(item), page.HttpError) {
-  use request <- result.try(build_request(scoop.url, user_agent))
+  let request = requestable.to_request(scoop.requestable, user_agent)
   use response <- result.try(fetch(request))
   case response.status {
     429 | 503 -> {
@@ -263,7 +275,7 @@ fn do_fetch(
     }
     _ ->
       page.Page(
-        url: scoop.url,
+        url: requestable.to_uri(scoop.requestable),
         status: response.status,
         body: response.body,
         candidates: next(response),
@@ -294,83 +306,21 @@ fn parse_http_date(value: String) -> Result(Int, Nil) {
   |> int.max(0)
 }
 
-fn build_request(
-  url: uri.Uri,
-  user_agent: String,
-) -> Result(request.Request(String), page.HttpError) {
-  use request <- result.try(
-    request.from_uri(url)
-    |> result.replace_error(page.BadRequest),
-  )
-  Ok(request.set_header(request, "user-agent", user_agent))
-}
-
-fn resolve_candidates(
-  outcome: page.Outcome(item),
-  scoop: frontier.Scoop,
-) -> page.Outcome(item) {
-  let candidates =
-    outcome.candidates
-    |> list.filter_map(resolve_url(scoop.url, _))
-  page.Outcome(..outcome, candidates:)
-}
-
-fn resolve_url(from: uri.Uri, link: uri.Uri) -> Result(uri.Uri, Nil) {
-  use resolved <- result.map(uri.merge(from, link))
-  case string.ends_with(link.path, "/"), string.ends_with(resolved.path, "/") {
-    True, False -> uri.Uri(..resolved, path: resolved.path <> "/")
-    _, _ -> resolved
-  }
-}
-
-fn filter_by_prefetch(
-  outcome: page.Outcome(item),
-  prefetch: fn(uri.Uri) -> Result(uri.Uri, Nil),
-) -> page.Outcome(item) {
-  let candidates =
-    outcome.candidates
-    |> list.filter_map(prefetch)
-  page.Outcome(..outcome, candidates:)
-}
-
 fn filter_by_scope(
-  outcome: page.Outcome(item),
+  links: List(requestable.Requestable),
   scope: config.Scope,
-) -> page.Outcome(item) {
-  let candidates =
-    outcome.candidates
-    |> list.filter(fn(link) {
-      case scope {
-        config.AllowAll -> True
-        config.AllowedHosts(hosts) -> {
-          host_match(link.host, hosts)
-        }
+) -> List(requestable.Requestable) {
+  list.filter(links, fn(link) {
+    case scope {
+      config.AllowAll -> True
+      config.AllowedHosts(hosts) -> {
+        requestable.to_uri(link).host
+        |> option.map(fn(host) {
+          hosts
+          |> list.contains(string.lowercase(host))
+        })
+        |> option.unwrap(False)
       }
-    })
-  page.Outcome(..outcome, candidates:)
-}
-
-fn host_match(host: option.Option(String), hosts: List(String)) -> Bool {
-  case host {
-    option.None -> False
-    option.Some(host) -> {
-      // host strings are lowercased in the builder public API
-      hosts
-      |> list.contains(string.lowercase(host))
     }
-  }
-}
-
-fn keep_requestable(outcome: page.Outcome(item)) -> page.Outcome(item) {
-  let candidates =
-    outcome.candidates
-    |> list.filter(fn(link) {
-      case link.scheme, link.host {
-        option.Some("http"), option.Some(_)
-        | option.Some("https"), option.Some(_)
-        -> True
-        _, _ -> False
-      }
-    })
-  page.Outcome(..outcome, candidates:)
+  })
 }

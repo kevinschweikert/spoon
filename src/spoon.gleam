@@ -9,9 +9,9 @@ import gleam/otp/static_supervisor as supervisor
 import gleam/result
 import gleam/string
 import gleam/uri
-import grip/origin
 import logging
 import spoon/internal/policy_cache
+import spoon/internal/requestable
 import spoon/internal/worker
 
 import spoon/internal/config
@@ -19,8 +19,24 @@ import spoon/internal/coordinator
 import spoon/middleware
 import spoon/page
 
+pub opaque type Requestable {
+  Requestable(requestable.Requestable)
+}
+
 pub opaque type Builder(item) {
   Builder(config: config.Config(item))
+}
+
+/// This converts a string representing a string to an internal
+/// representation. This checks if the link contains a requestable
+/// scheme, if a host is set and removes fragments from the link itself.
+///
+/// This is to ensure that the given links are conforming to the needs of
+/// the crawl.
+pub fn requestable(input: String) -> Result(Requestable, Nil) {
+  use url <- result.try(uri.parse(input))
+  use requestable <- result.try(requestable.from_uri(url))
+  Ok(Requestable(requestable))
 }
 
 @external(erlang, "spoon_ffi", "monotonic_time")
@@ -39,14 +55,14 @@ pub fn monotonic_time() -> Int
 /// |> spoon.new()
 /// |> spoon.run()
 /// ```
-pub fn new(url url: uri.Uri) -> Builder(Nil) {
+pub fn new(url url: Requestable) -> Builder(Nil) {
+  let Requestable(requestable) = url
   Builder(
     config.Config(
-      base_url: url,
+      base_url: requestable,
       seeds: [],
       fetch: default_fetch,
       on_page: default_on_page,
-      prefetch: Ok,
       next: default_next,
       max_pages: 10,
       max_concurrency: 10,
@@ -54,7 +70,8 @@ pub fn new(url url: uri.Uri) -> Builder(Nil) {
       clock: monotonic_time,
       delay_ms: 1000,
       max_attempts: 3,
-      scope: case url.host {
+      respect_robots: True,
+      scope: case requestable.to_uri(requestable).host {
         option.Some(host) -> config.AllowedHosts([host])
         option.None -> config.AllowedHosts([])
       },
@@ -70,8 +87,11 @@ pub fn new(url url: uri.Uri) -> Builder(Nil) {
 ///
 /// If no seed is given, the only starting url is the one given in
 /// `new`
-pub fn seed(builder: Builder(item), url: uri.Uri) -> Builder(item) {
-  Builder(config.Config(..builder.config, seeds: [url, ..builder.config.seeds]))
+pub fn seed(builder: Builder(item), url: Requestable) -> Builder(item) {
+  let Requestable(requestable) = url
+  Builder(
+    config.Config(..builder.config, seeds: [requestable, ..builder.config.seeds]),
+  )
 }
 
 /// Callback when a new link was visited
@@ -87,17 +107,6 @@ pub fn on_page(
   on_page: fn(page.Page) -> page.Outcome(b),
 ) -> Builder(b) {
   Builder(config.Config(..builder.config, on_page:))
-}
-
-/// Callback before a page gets visited
-///
-/// Depending on the result the page will be visisted or
-/// not.
-pub fn prefetch(
-  builder: Builder(a),
-  prefetch: fn(uri.Uri) -> Result(uri.Uri, Nil),
-) -> Builder(a) {
-  Builder(config.Config(..builder.config, prefetch:))
 }
 
 /// Callback after a page got visited to get the next potential
@@ -130,6 +139,16 @@ pub fn max_concurrency(
 /// the same origin
 pub fn rate_limit(builder: Builder(item), delay_ms: Int) -> Builder(item) {
   Builder(config.Config(..builder.config, delay_ms:))
+}
+
+/// Configures the crawler to consult a `/robots.txt` beforehand and respect
+/// it's rules. It is recommended to keep this set to `True` so the crawl is
+/// not overloading servers and requesting unwanted resources.
+pub fn respect_robots(
+  builder: Builder(item),
+  respect_robots: Bool,
+) -> Builder(item) {
+  Builder(config.Config(..builder.config, respect_robots:))
 }
 
 /// Sets how often a URL is retried after an unsuccesful fetch before
@@ -185,22 +204,6 @@ pub fn fold(
   initial: acc,
   combine: fn(acc, item) -> acc,
 ) -> Result(acc, actor.StartError) {
-  let urls = [builder.config.base_url, ..builder.config.seeds]
-  let origins =
-    list.map(urls, fn(seed) {
-      origin.from_uri(seed) |> result.replace_error(seed)
-    })
-
-  use _ <- result.try(
-    result.all(origins)
-    |> result.map_error(fn(url) {
-      actor.InitFailed(
-        uri.to_string(url)
-        <> " is malformed. Ensure scheme and host are present",
-      )
-    }),
-  )
-
   let coordinator_name = process.new_name("coordinator")
   let workers_name = process.new_name("workers")
   let policy_cache_name = process.new_name("policy_cache")
@@ -245,7 +248,7 @@ fn default_fetch(
       httpc.InvalidUtf8Response -> page.BadResponse
       httpc.FailedToConnect(..) -> page.Network
       httpc.ResponseTimeout -> page.Network
-      httpc.ResponseHeaderTooLarge -> page.BadRequest
+      httpc.ResponseHeaderTooLarge -> page.BadResponse
       httpc.ResponseBodyTooLarge -> page.BadResponse
     }
   })

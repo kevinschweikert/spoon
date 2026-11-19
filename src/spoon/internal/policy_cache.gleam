@@ -18,6 +18,7 @@ import grip/origin
 import logging
 import spoon/internal/config
 import spoon/internal/frontier
+import spoon/internal/requestable
 import spoon/internal/worker
 import spoon/page
 
@@ -107,13 +108,14 @@ fn handle_message(
           logging.log(
             logging.Debug,
             "[POLICY] Fetching "
-              <> origin.robots_url(scoop.origin) |> uri.to_string(),
+              <> origin.robots_url(scoop.requestable.origin) |> uri.to_string(),
           )
           spawn_fetch(
             cache.name,
             cache.workers,
             cache.config.fetch,
-            scoop.origin,
+            scoop.requestable.origin,
+            cache.config.user_agent,
           )
 
           cache |> add_pending(waiting) |> actor.continue
@@ -148,8 +150,8 @@ fn handle_message(
 }
 
 fn lookup(cache: Cache(item), scoop: frontier.Scoop) -> Lookup {
-  let pending = dict.has_key(cache.pending, scoop.origin)
-  case dict.get(cache.policies, scoop.origin) {
+  let pending = dict.has_key(cache.pending, scoop.requestable.origin)
+  case dict.get(cache.policies, scoop.requestable.origin) {
     Ok(Entry(policy:, fetched_at:)) ->
       case is_fresh(fetched_at), pending {
         True, _ -> Fresh(policy)
@@ -170,6 +172,7 @@ fn spawn_fetch(
   fetch: fn(request.Request(String)) ->
     Result(response.Response(String), page.HttpError),
   origin: origin.Origin,
+  user_agent: String,
 ) -> Nil {
   let subject = process.named_subject(name)
 
@@ -177,7 +180,7 @@ fn spawn_fetch(
     worker_name,
     worker.Job(
       run: fn() {
-        fetch_robots(fetch, origin)
+        fetch_robots(fetch, origin, user_agent)
         |> Policy(origin:, policy: _)
         |> process.send(subject, _)
       },
@@ -191,7 +194,7 @@ fn spawn_fetch(
 }
 
 fn add_pending(cache: Cache(item), waiting: Waiting) -> Cache(item) {
-  let origin = waiting.scoop.origin
+  let origin = waiting.scoop.requestable.origin
   let waitings = dict.get(cache.pending, origin) |> result.unwrap([])
   Cache(
     ..cache,
@@ -208,11 +211,11 @@ fn fetch_robots(
   fetch: fn(request.Request(String)) ->
     Result(response.Response(String), page.HttpError),
   origin: origin.Origin,
+  user_agent: String,
 ) -> Result(grip.Policy, page.HttpError) {
-  let robots_url = origin.robots_url(origin)
-  use request <- result.try(
-    request.from_uri(robots_url) |> result.replace_error(page.BadRequest),
-  )
+  let request =
+    origin.robots_request(origin)
+    |> request.set_header("user-agent", user_agent)
   use response <- result.try(
     fetch(request) |> result.replace_error(page.BadResponse),
   )
@@ -245,7 +248,8 @@ fn apply_scoop(
   scoop: frontier.Scoop,
   user_agent: String,
 ) -> PolicyAnswer {
-  let allowed = grip.is_allowed(policy, user_agent, scoop.url)
+  let url = requestable.to_uri(scoop.requestable)
+  let allowed = grip.is_allowed(policy, user_agent, url)
   let delay_ms =
     grip.rate(policy, user_agent)
     |> result.map(fn(rate) { float.round(grip.interval(rate) *. 1000.0) })
