@@ -10,11 +10,11 @@ const short_delay = 250
 fn scoop(url: String) -> frontier.Scoop {
   let assert Ok(url) = uri.parse(url)
   let assert Ok(requestable) = requestable.from_uri(url)
-  frontier.new_scoop(requestable)
+  frontier.new_scoop(option.None, requestable)
 }
 
 pub fn pop_on_an_empty_frontier_is_empty_test() {
-  let #(_, popped) = frontier.new() |> frontier.pop(0)
+  let #(_, popped) = frontier.new(option.None) |> frontier.pop(0)
 
   assert popped == frontier.Empty
 }
@@ -23,7 +23,7 @@ pub fn pop_returns_a_pushed_scoop_test() {
   let a_first = scoop("https://a.example/1")
 
   let #(_, popped) =
-    frontier.new()
+    frontier.new(option.None)
     |> frontier.push(a_first, 0)
     |> frontier.pop(0)
 
@@ -32,7 +32,7 @@ pub fn pop_returns_a_pushed_scoop_test() {
 
 pub fn pop_puts_the_scoop_in_flight_test() {
   let queue =
-    frontier.new()
+    frontier.new(option.None)
     |> frontier.push(scoop("https://a.example/1"), 0)
   assert frontier.in_flight(queue) == 0
 
@@ -43,7 +43,7 @@ pub fn pop_puts_the_scoop_in_flight_test() {
 
 pub fn one_request_in_flight_per_origin_test() {
   let queue =
-    frontier.new()
+    frontier.new(option.None)
     |> frontier.push(scoop("https://a.example/1"), 0)
     |> frontier.push(scoop("https://a.example/2"), 0)
 
@@ -58,7 +58,7 @@ pub fn different_origins_run_in_parallel_test() {
   let a_first = scoop("https://a.example/1")
   let b_first = scoop("https://b.example/1")
   let queue =
-    frontier.new()
+    frontier.new(option.None)
     |> frontier.push(a_first, 0)
     |> frontier.push(b_first, 100)
 
@@ -74,7 +74,7 @@ pub fn each_origin_cools_for_its_own_delay_test() {
   let a_first = scoop("https://a.example/1")
   let b_first = scoop("https://b.example/1")
   let queue =
-    frontier.new()
+    frontier.new(option.None)
     |> frontier.push(a_first, 0)
     |> frontier.push(scoop("https://a.example/2"), 0)
   let #(queue, _) = frontier.pop(queue, 0)
@@ -98,7 +98,7 @@ pub fn each_origin_cools_for_its_own_delay_test() {
 pub fn settle_cools_the_origin_test() {
   let a_first = scoop("https://a.example/1")
   let queue =
-    frontier.new()
+    frontier.new(option.None)
     |> frontier.push(a_first, 0)
     |> frontier.push(scoop("https://a.example/2"), 0)
 
@@ -115,7 +115,7 @@ pub fn settle_cools_the_origin_test() {
 pub fn cooling_ends_at_next_at_test() {
   let a_first = scoop("https://a.example/1")
   let queue =
-    frontier.new()
+    frontier.new(option.None)
     |> frontier.push(a_first, 0)
     |> frontier.push(scoop("https://a.example/2"), 0)
 
@@ -134,7 +134,7 @@ pub fn scoops_are_served_in_order_within_an_origin_test() {
   let a_first = scoop("https://a.example/1")
   let a_second = scoop("https://a.example/2")
   let queue =
-    frontier.new()
+    frontier.new(option.None)
     |> frontier.push(a_first, 0)
     |> frontier.push(a_second, 0)
 
@@ -150,7 +150,7 @@ pub fn scoops_are_served_in_order_within_an_origin_test() {
 
 pub fn cooling_reports_the_earliest_origin_test() {
   let queue =
-    frontier.new()
+    frontier.new(option.None)
     |> frontier.push(scoop("https://a.example/1"), 0)
     |> frontier.push(scoop("https://a.example/2"), 0)
     |> frontier.push(scoop("https://b.example/1"), 0)
@@ -170,7 +170,7 @@ pub fn cooling_reports_the_earliest_origin_test() {
 pub fn draining_an_origin_ends_empty_test() {
   let a_first = scoop("https://a.example/1")
   let queue =
-    frontier.new()
+    frontier.new(option.None)
     |> frontier.push(a_first, 0)
     |> frontier.push(scoop("https://a.example/2"), 0)
 
@@ -193,7 +193,7 @@ pub fn requeue_returns_the_scoop_to_the_front_test() {
   let a_second = scoop("https://a.example/2")
   let a_first_retried = frontier.Scoop(..a_first, attempts: 1)
   let #(queue, _) =
-    frontier.new()
+    frontier.new(option.None)
     |> frontier.push(a_first, 0)
     |> frontier.pop(0)
 
@@ -209,7 +209,7 @@ pub fn requeue_returns_the_scoop_to_the_front_test() {
 pub fn requeue_frees_the_origin_test() {
   let a_first = scoop("https://a.example/1")
   let #(queue, _) =
-    frontier.new()
+    frontier.new(option.None)
     |> frontier.push(a_first, 0)
     |> frontier.pop(0)
 
@@ -221,7 +221,7 @@ pub fn requeue_frees_the_origin_test() {
 pub fn requeue_cools_the_origin_test() {
   let a_first = scoop("https://a.example/1")
   let #(queue, _) =
-    frontier.new()
+    frontier.new(option.None)
     |> frontier.push(a_first, 0)
     |> frontier.pop(0)
 
@@ -236,7 +236,7 @@ pub fn requeue_cools_the_origin_test() {
 pub fn requeue_without_a_scoop_in_flight_is_a_no_op_test() {
   let a_first = scoop("https://a.example/1")
   let #(queue, _) =
-    frontier.new()
+    frontier.new(option.None)
     |> frontier.push(a_first, 0)
     |> frontier.pop(0)
 
@@ -254,7 +254,7 @@ pub fn requeue_on_an_unknown_origin_is_a_no_op_test() {
   let b_first = scoop("https://b.example/1")
 
   let #(queue, popped) =
-    frontier.new()
+    frontier.new(option.None)
     |> frontier.requeue(b_first.requestable.origin, delay, 0)
     |> frontier.pop(0)
 
@@ -265,7 +265,7 @@ pub fn requeue_on_an_unknown_origin_is_a_no_op_test() {
 pub fn penalize_frees_the_origin_test() {
   let a_first = scoop("https://a.example/1")
   let #(queue, _) =
-    frontier.new()
+    frontier.new(option.None)
     |> frontier.push(a_first, 0)
     |> frontier.pop(0)
 
@@ -278,7 +278,7 @@ pub fn penalize_frees_the_origin_test() {
 pub fn penalize_cools_the_origin_for_twice_the_delay_test() {
   let a_first = scoop("https://a.example/1")
   let #(queue, _) =
-    frontier.new()
+    frontier.new(option.None)
     |> frontier.push(a_first, 0)
     |> frontier.push(scoop("https://a.example/2"), 0)
     |> frontier.pop(0)
@@ -295,7 +295,7 @@ pub fn penalize_does_not_requeue_the_scoop_test() {
   let a_first = scoop("https://a.example/1")
   let a_second = scoop("https://a.example/2")
   let #(queue, _) =
-    frontier.new()
+    frontier.new(option.None)
     |> frontier.push(a_first, 0)
     |> frontier.push(a_second, 0)
     |> frontier.pop(0)
@@ -311,7 +311,7 @@ pub fn penalize_does_not_requeue_the_scoop_test() {
 pub fn penalize_backs_off_exponentially_test() {
   let a_first = scoop("https://a.example/1")
   let queue =
-    frontier.new()
+    frontier.new(option.None)
     |> frontier.push(a_first, 0)
     |> frontier.push(scoop("https://a.example/2"), 0)
     |> frontier.push(scoop("https://a.example/3"), 0)
@@ -337,7 +337,7 @@ pub fn penalize_backs_off_exponentially_test() {
 pub fn penalize_honours_retry_after_test() {
   let a_first = scoop("https://a.example/1")
   let #(queue, _) =
-    frontier.new()
+    frontier.new(option.None)
     |> frontier.push(a_first, 0)
     |> frontier.push(scoop("https://a.example/2"), 0)
     |> frontier.pop(0)
@@ -359,7 +359,7 @@ pub fn penalize_on_an_unknown_origin_is_a_no_op_test() {
   let b_first = scoop("https://b.example/1")
 
   let #(queue, popped) =
-    frontier.new()
+    frontier.new(option.None)
     |> frontier.penalize(b_first.requestable.origin, delay, 0, option.None)
     |> frontier.pop(0)
 
@@ -371,10 +371,60 @@ pub fn settle_on_an_unknown_origin_is_a_no_op_test() {
   let b_first = scoop("https://b.example/1")
 
   let #(queue, popped) =
-    frontier.new()
+    frontier.new(option.None)
     |> frontier.settle(b_first.requestable.origin, delay, 0)
     |> frontier.pop(0)
 
   assert popped == frontier.Empty
   assert frontier.in_flight(queue) == 0
+}
+
+pub fn new_scoop_increments_depth_from_its_parent_test() {
+  let assert Ok(url) = uri.parse("https://a.example/1")
+  let assert Ok(requestable) = requestable.from_uri(url)
+  let seed = frontier.new_scoop(option.None, requestable)
+  let child = frontier.new_scoop(option.Some(seed), requestable)
+  let grandchild = frontier.new_scoop(option.Some(child), requestable)
+
+  assert seed.depth == 0
+  assert child.depth == 1
+  assert grandchild.depth == 2
+}
+
+pub fn push_rejects_a_scoop_past_max_depth_test() {
+  let a_first = scoop("https://a.example/1")
+  let too_deep = frontier.Scoop(..scoop("https://a.example/2"), depth: 2)
+  let queue =
+    frontier.new(option.Some(1))
+    |> frontier.push(a_first, 0)
+    |> frontier.push(too_deep, 0)
+
+  let #(queue, first_pop) = frontier.pop(queue, 0)
+  let #(_, second_pop) =
+    queue
+    |> frontier.settle(a_first.requestable.origin, delay, 0)
+    |> frontier.pop(0)
+
+  assert first_pop == frontier.Took(a_first)
+  assert second_pop == frontier.Empty
+}
+
+pub fn push_accepts_a_scoop_at_exactly_max_depth_test() {
+  let at_limit = frontier.Scoop(..scoop("https://a.example/1"), depth: 1)
+  let #(_, popped) =
+    frontier.new(option.Some(1))
+    |> frontier.push(at_limit, 0)
+    |> frontier.pop(0)
+
+  assert popped == frontier.Took(at_limit)
+}
+
+pub fn push_without_a_max_depth_accepts_any_depth_test() {
+  let deep = frontier.Scoop(..scoop("https://a.example/1"), depth: 50)
+  let #(_, popped) =
+    frontier.new(option.None)
+    |> frontier.push(deep, 0)
+    |> frontier.pop(0)
+
+  assert popped == frontier.Took(deep)
 }

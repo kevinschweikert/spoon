@@ -9,11 +9,24 @@ Ladle your (presentable) soup! Spoon is a Gleam crawler framework.
 gleam add spoon@1
 ```
 
+`spoon` is a Gleam web crawler framework. It currently only runs on the Erlang target
+because it makes heavy use of OTP framework to parallelize the work as best as possible.
+
+By default it tries to be as polite as possible. That means:
+
+- respecting `robots.txt`
+- respecting HTTP status code 429 and their `Retry-After` header
+- respecting links with `rel="nofollow"`
+- respecting meta tags with `"noindex"`
+- abort after a configurable amount of retries
+- defaults to a 1s request interval per host
+- defaults to stay on the configured host
+
 ```gleam
 import spoon
 
 pub fn main() -> Nil {
-      let assert Ok(example_com) = spoon.requestable("https://example.com")
+      let assert Ok(example_com) = spoon.request("https://example.com")
 
       example_com
       |> spoon.new()

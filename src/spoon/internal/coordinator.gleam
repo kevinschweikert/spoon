@@ -81,6 +81,7 @@ pub fn start(
         max_concurrency: config.max_concurrency,
         max_pages: config.max_pages,
         max_attempts: config.max_attempts,
+        max_depth: config.max_depth,
       )
     let #(crawl, effects) = crawl.new(crawl_settings, now)
 
@@ -189,7 +190,7 @@ fn advance(
     crawl.update(
       coordinator.crawl,
       crawl.Fetched(
-        origin: scoop.requestable.origin,
+        scoop: scoop,
         crawl_delay_ms: option.or(
           crawl_delay_ms,
           option.Some(coordinator.config.delay_ms),

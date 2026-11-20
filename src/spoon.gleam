@@ -33,9 +33,14 @@ pub opaque type Builder(item) {
 ///
 /// This is to ensure that the given links are conforming to the needs of
 /// the crawl.
-pub fn requestable(input: String) -> Result(Requestable, Nil) {
+pub fn request(input: String) -> Result(Requestable, Nil) {
   use url <- result.try(uri.parse(input))
-  use requestable <- result.try(requestable.from_uri(url))
+  request_from_uri(url)
+}
+
+/// Same as `request` but you already pass a `uri.Uri` instead of a string.
+pub fn request_from_uri(input: uri.Uri) -> Result(Requestable, Nil) {
+  use requestable <- result.try(requestable.from_uri(input))
   Ok(Requestable(requestable))
 }
 
@@ -47,6 +52,9 @@ pub fn monotonic_time() -> Int
 ///
 /// Run it with either `run` for a simple case or `fold` if you
 /// need an accumulator
+///
+/// By default it stops after 10 found pages. Use `max_pages` or
+/// `unlimited_pages` to control long the crawler should go on.
 ///
 /// ## Examples
 ///
@@ -64,7 +72,8 @@ pub fn new(url url: Requestable) -> Builder(Nil) {
       fetch: default_fetch,
       on_page: default_on_page,
       next: default_next,
-      max_pages: 10,
+      max_pages: option.Some(10),
+      max_depth: option.None,
       max_concurrency: 10,
       user_agent: "spoon/1.0",
       clock: monotonic_time,
@@ -124,7 +133,24 @@ pub fn next(
 /// Sets the maximum number of pages after the crawl will be
 /// aborted
 pub fn max_pages(builder: Builder(item), max_pages: Int) -> Builder(item) {
-  Builder(config.Config(..builder.config, max_pages:))
+  Builder(config.Config(..builder.config, max_pages: option.Some(max_pages)))
+}
+
+/// Disables the page limit and will crawl unless no links are found.
+/// This will result in an unbounded crawl and should we used with care!
+pub fn unlimited_pages(builder: Builder(item)) {
+  Builder(config.Config(..builder.config, max_pages: option.None))
+}
+
+/// Sets the maximum depths the links get crawled. Each link on a page increases
+/// the depth
+///
+/// Start URL: depth == 1
+/// Eeach child URL: depth == 2
+/// Each child of child URL: depth == 3
+/// ...
+pub fn max_depth(builder: Builder(item), max_depth: Int) -> Builder(item) {
+  Builder(config.Config(..builder.config, max_depth: option.Some(max_depth)))
 }
 
 /// Sets the maximum number of in flight HTTP requests at a given time
@@ -136,8 +162,8 @@ pub fn max_concurrency(
 }
 
 /// Sets the minimum delay in milliseconds between two requests to
-/// the same origin
-pub fn rate_limit(builder: Builder(item), delay_ms: Int) -> Builder(item) {
+/// the same host.
+pub fn delay(builder: Builder(item), delay_ms: Int) -> Builder(item) {
   Builder(config.Config(..builder.config, delay_ms:))
 }
 
@@ -171,7 +197,7 @@ pub fn user_agent(builder: Builder(item), user_agent: String) -> Builder(item) {
 ///
 /// By default the initial url is used  as the only host, so we crawl only
 /// on a single host if not further specified.
-pub fn allowed_domains(builder: Builder(item), allowed: List(String)) {
+pub fn allowed_hosts(builder: Builder(item), allowed: List(String)) {
   Builder(
     config.Config(
       ..builder.config,
@@ -182,7 +208,7 @@ pub fn allowed_domains(builder: Builder(item), allowed: List(String)) {
 
 /// Disables host matching and basically crawls the whole web.
 /// Use with caution!
-pub fn allow_all_domains(builder: Builder(item)) {
+pub fn allow_all_hosts(builder: Builder(item)) {
   Builder(config.Config(..builder.config, scope: config.AllowAll))
 }
 

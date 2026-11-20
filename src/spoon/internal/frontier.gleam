@@ -26,7 +26,7 @@ pub type Slot {
 // - `in_flight` walks the whole dict on every call. A running counter
 //   updated in `pop`, `settle`, and `requeue` would avoid that traversal.
 pub opaque type Frontier {
-  Frontier(slots: dict.Dict(Origin, Slot))
+  Frontier(slots: dict.Dict(Origin, Slot), max_depth: option.Option(Int))
 }
 
 pub type Popped {
@@ -35,12 +35,21 @@ pub type Popped {
   Empty
 }
 
-pub fn new_scoop(requestable: requestable.Requestable) -> Scoop {
-  Scoop(depth: 0, attempts: 0, requestable:)
+pub fn new_scoop(
+  parent: option.Option(Scoop),
+  requestable: requestable.Requestable,
+) -> Scoop {
+  Scoop(
+    depth: parent
+      |> option.map(fn(scoop) { scoop.depth + 1 })
+      |> option.unwrap(0),
+    attempts: 0,
+    requestable:,
+  )
 }
 
-pub fn new() -> Frontier {
-  Frontier(slots: dict.new())
+pub fn new(max_depth: option.Option(Int)) -> Frontier {
+  Frontier(slots: dict.new(), max_depth:)
 }
 
 pub fn pop(frontier: Frontier, now: Int) -> #(Frontier, Popped) {
@@ -50,7 +59,7 @@ pub fn pop(frontier: Frontier, now: Int) -> #(Frontier, Popped) {
       case slot.next_at > now {
         True -> #(frontier, Cooling(until: slot.next_at))
         False -> #(
-          Frontier(slots: dict.insert(frontier.slots, origin, slot)),
+          Frontier(..frontier, slots: dict.insert(frontier.slots, origin, slot)),
           Took(scoop),
         )
       }
@@ -85,24 +94,37 @@ fn is_better(best: option.Option(#(Origin, Slot, Scoop)), slot: Slot) -> Bool {
 }
 
 pub fn push(frontier: Frontier, scoop: Scoop, now: Int) -> Frontier {
+  use <- bool.guard(
+    case frontier.max_depth {
+      option.Some(max_depth) -> scoop.depth > max_depth
+      option.None -> False
+    },
+    frontier,
+  )
   case dict.get(frontier.slots, scoop.requestable.origin) {
     Ok(slot) ->
-      Frontier(slots: dict.insert(
-        frontier.slots,
-        scoop.requestable.origin,
-        Slot(..slot, scoops: deque.push_back(slot.scoops, scoop)),
-      ))
-    Error(_) ->
-      Frontier(slots: dict.insert(
-        frontier.slots,
-        scoop.requestable.origin,
-        Slot(
-          scoops: deque.from_list([scoop]),
-          in_flight: option.None,
-          failures: 0,
-          next_at: now,
+      Frontier(
+        ..frontier,
+        slots: dict.insert(
+          frontier.slots,
+          scoop.requestable.origin,
+          Slot(..slot, scoops: deque.push_back(slot.scoops, scoop)),
         ),
-      ))
+      )
+    Error(_) ->
+      Frontier(
+        ..frontier,
+        slots: dict.insert(
+          frontier.slots,
+          scoop.requestable.origin,
+          Slot(
+            scoops: deque.from_list([scoop]),
+            in_flight: option.None,
+            failures: 0,
+            next_at: now,
+          ),
+        ),
+      )
   }
 }
 
@@ -116,7 +138,7 @@ pub fn settle(
     Ok(slot) -> {
       use <- bool.guard(option.is_none(slot.in_flight), frontier)
       let slot = Slot(..slot, in_flight: option.None, next_at: now + delay_ms)
-      Frontier(slots: dict.insert(frontier.slots, origin, slot))
+      Frontier(..frontier, slots: dict.insert(frontier.slots, origin, slot))
     }
     Error(_) -> frontier
   }
@@ -130,19 +152,22 @@ pub fn requeue(
 ) -> Frontier {
   case dict.get(frontier.slots, origin) {
     Ok(Slot(scoops: scoops, in_flight: option.Some(scoop), ..) as slot) -> {
-      Frontier(slots: dict.insert(
-        frontier.slots,
-        origin,
-        Slot(
-          ..slot,
-          next_at: now + delay_ms,
-          in_flight: option.None,
-          scoops: deque.push_front(
-            scoops,
-            Scoop(..scoop, attempts: scoop.attempts + 1),
+      Frontier(
+        ..frontier,
+        slots: dict.insert(
+          frontier.slots,
+          origin,
+          Slot(
+            ..slot,
+            next_at: now + delay_ms,
+            in_flight: option.None,
+            scoops: deque.push_front(
+              scoops,
+              Scoop(..scoop, attempts: scoop.attempts + 1),
+            ),
           ),
         ),
-      ))
+      )
     }
     _ -> frontier
   }
@@ -166,7 +191,7 @@ pub fn penalize(
       let slot =
         Slot(..slot, next_at: now + backoff, failures:, in_flight: option.None)
       let slots = dict.insert(frontier.slots, origin, slot)
-      Frontier(slots:)
+      Frontier(..frontier, slots:)
     }
     Error(_) -> frontier
   }

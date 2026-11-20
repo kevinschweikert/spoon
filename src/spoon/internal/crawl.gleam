@@ -11,7 +11,8 @@ pub type Settings {
     seeds: List(requestable.Requestable),
     delay_ms: Int,
     max_concurrency: Int,
-    max_pages: Int,
+    max_pages: option.Option(Int),
+    max_depth: option.Option(Int),
     max_attempts: Int,
   )
 }
@@ -30,7 +31,7 @@ pub type Crawl {
 
 pub type Message {
   Fetched(
-    origin: Origin,
+    scoop: frontier.Scoop,
     crawl_delay_ms: option.Option(Int),
     links: List(requestable.Requestable),
   )
@@ -47,23 +48,30 @@ pub type Effect {
 
 pub fn new(settings: Settings, now: Int) -> #(Crawl, List(Effect)) {
   let crawl =
-    Crawl(settings:, seen: set.new(), frontier: frontier.new(), requests: 0)
+    Crawl(
+      settings:,
+      seen: set.new(),
+      frontier: frontier.new(settings.max_depth),
+      requests: 0,
+    )
 
   crawl
-  |> push_links(settings.seeds, now)
+  |> push_links(option.None, settings.seeds, now)
   |> next(now)
 }
 
 pub fn update(crawl: Crawl, msg: Message, now: Int) -> #(Crawl, List(Effect)) {
   case msg {
-    Fetched(origin:, crawl_delay_ms:, links:) ->
-      case frontier.in_flight_for(crawl.frontier, origin) {
+    Fetched(scoop:, crawl_delay_ms:, links:) ->
+      case frontier.in_flight_for(crawl.frontier, scoop.requestable.origin) {
         option.None -> #(crawl, [])
         option.Some(_) -> {
           let crawl =
-            crawl |> settle(origin, crawl_delay_ms, now) |> increment_request()
+            crawl
+            |> settle(scoop.requestable.origin, crawl_delay_ms, now)
+            |> increment_request()
           crawl
-          |> push_links(links, now)
+          |> push_links(option.Some(scoop), links, now)
           |> next(now)
         }
       }
@@ -90,6 +98,7 @@ fn increment_request(crawl: Crawl) -> Crawl {
 
 fn push_links(
   crawl: Crawl,
+  parent: option.Option(frontier.Scoop),
   links: List(requestable.Requestable),
   now: Int,
 ) -> Crawl {
@@ -101,7 +110,7 @@ fn push_links(
           seen: set.insert(crawl.seen, requestable),
           frontier: frontier.push(
             crawl.frontier,
-            frontier.new_scoop(requestable),
+            frontier.new_scoop(parent, requestable),
             now,
           ),
         )
@@ -115,7 +124,7 @@ fn settle(
   origin: Origin,
   delay_ms: option.Option(Int),
   now: Int,
-) {
+) -> Crawl {
   Crawl(
     ..crawl,
     frontier: crawl.frontier
@@ -132,7 +141,7 @@ fn requeue(
   origin: Origin,
   delay_ms: option.Option(Int),
   now: Int,
-) {
+) -> Crawl {
   Crawl(
     ..crawl,
     frontier: frontier.requeue(
@@ -196,5 +205,12 @@ fn finish(crawl: Crawl, effects: List(Effect)) -> #(Crawl, List(Effect)) {
 fn capacity_reached(crawl: Crawl) -> Bool {
   let in_flight = frontier.in_flight(crawl.frontier)
   in_flight >= crawl.settings.max_concurrency
-  || crawl.requests + in_flight >= crawl.settings.max_pages
+  || max_pages_reached(crawl, in_flight)
+}
+
+fn max_pages_reached(crawl: Crawl, in_flight: Int) -> Bool {
+  case crawl.settings.max_pages {
+    option.None -> False
+    option.Some(max_pages) -> crawl.requests + in_flight >= max_pages
+  }
 }

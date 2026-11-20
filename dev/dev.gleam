@@ -4,12 +4,11 @@ import spoon/middleware
 import spoon/page
 
 pub fn main() {
-  let assert Ok(url) = spoon.requestable("https://kevinschweikert.de")
+  let assert Ok(url) = spoon.request("https://kevinschweikert.de")
 
   spoon.new(url)
   |> spoon.max_pages(100)
-  |> spoon.rate_limit(1000)
-  |> spoon.allow_all_domains()
+  |> spoon.delay(1000)
   |> spoon.on_page(on_site)
   |> spoon.fold([], fn(acc, _visited_url) { acc })
 }

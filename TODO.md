@@ -2,12 +2,6 @@
 
 I know this is LLM generated but this is my way of brainstorming and keeping track of tasks. The code will still be hand written, because that's the fun part and why i'm doing it.
 
-## Now: finish origin-keyed scheduling
-
-- [x] `spoon.respect_robots(Bool)`, default `True`
-
-Checkpoint: a 429-ing origin slows exponentially while others continue, on the stepped clock.
-
 ## Next: Page API (breaking)
 
 fetch → `extract_links` → normalize → `on_page` → scope → enqueue.
@@ -15,7 +9,6 @@ fetch → `extract_links` → normalize → `on_page` → scope → enqueue.
 
 - [ ] Opaque `Page(item)` and `Link(url, nofollow)`; `page.new` for tests
 - [ ] Accessors `url`/`status`/`depth`/`links`/`item`, setters `with_item`/`nofollow`
-- [ ] `links` keeps every link; scope and nofollow filter the crawl
 - [ ] `extract_links` replaces `next`, default `extract.anchors`; only way to add URLs
 - [ ] `on_page` for 2xx only, gets `Page(Nil)` + `Response`
 - [ ] `fold` over `Visit = Fetched | Redirected | Skipped | Failed`
@@ -27,20 +20,16 @@ fetch → `extract_links` → normalize → `on_page` → scope → enqueue.
 - [ ] `spoon.Error` instead of `actor.StartError`
 - [ ] Delete `prefetch`, `next`, `Outcome`, `Report`
 - [ ] `middleware` → pure `extract` helpers; `log` wraps a fold fn
-- [ ] Rename to `allowed_hosts`/`allow_all_hosts`, `rate_limit` → `delay`
 
 Checkpoint: a link graph and a dead-link report are each one `fold`.
 
 ## Then: scope and bounds
 
-- [ ] `max_depth`, set from the parent in `push_links`
 - [ ] Redirect hop limit; redirects don't increment depth
 - [ ] Per-origin queued cap, global `max_frontier` (drop and count, never block)
 - [ ] Maximum URL length
 - [ ] Path include/exclude as a scope knob
 - [ ] Subdomain matching as an explicit option
-- [ ] `spoon.respect_nofollow(Bool)`, default `True`
-- [ ] `noindex` and canonical-link preference
 - [ ] Sitemap ingestion via `extract.sitemap_locs`; needs `grip.sitemaps`
 
 ## Fetch rework (breaking, decide before 1.0)

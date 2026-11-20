@@ -25,7 +25,7 @@ fn req(text: String) -> requestable.Requestable {
 }
 
 fn scoop(text: String) -> frontier.Scoop {
-  frontier.new_scoop(req(text))
+  frontier.new_scoop(option.None, req(text))
 }
 
 fn fetch(text: String) -> crawl.Effect {
@@ -47,7 +47,8 @@ fn settings_with(seeds: List(String)) -> crawl.Settings {
     seeds: list.map(seeds, req),
     delay_ms: delay,
     max_concurrency: 10,
-    max_pages: 100,
+    max_pages: option.Some(100),
+    max_depth: option.None,
     max_attempts: 3,
   )
 }
@@ -57,7 +58,7 @@ fn succeeded(
   links: List(String),
   crawl_delay_ms: option.Option(Int),
 ) -> crawl.Message {
-  crawl.Fetched(origin_of(text), crawl_delay_ms, list.map(links, req))
+  crawl.Fetched(scoop(text), crawl_delay_ms, list.map(links, req))
 }
 
 fn failed(text: String) -> crawl.Message {
@@ -108,7 +109,10 @@ pub fn max_concurrency_limits_the_first_dispatch_test() {
 
 pub fn max_pages_zero_finishes_without_fetching_test() {
   let settings =
-    crawl.Settings(..settings_with(["https://a.example/"]), max_pages: 0)
+    crawl.Settings(
+      ..settings_with(["https://a.example/"]),
+      max_pages: option.Some(0),
+    )
   let #(_, effects) = crawl.new(settings, 0)
 
   assert effects == [crawl.Done]
@@ -237,7 +241,7 @@ pub fn a_skipped_page_is_not_counted_as_a_request_test() {
         "https://a.example/private/x",
         "https://a.example/public/y",
       ]),
-      max_pages: 1,
+      max_pages: option.Some(1),
     )
   let #(state, _) = crawl.new(settings, 0)
   let #(_, effects) =
@@ -361,7 +365,7 @@ pub fn max_pages_stops_dispatch_and_finishes_when_in_flight_drains_test() {
         "https://b.example/",
         "https://c.example/",
       ]),
-      max_pages: 2,
+      max_pages: option.Some(2),
     )
   let #(state, started) = crawl.new(settings, 0)
   let assert [first_url, second_url] = fetched_urls(started)
@@ -402,4 +406,38 @@ pub fn a_page_that_crashes_three_times_is_dropped_test() {
   assert after_second_crash == [crawl.Wake(at: 2100)]
   assert second_attempt_again == [crawl.Fetch(second_retry)]
   assert after_third_crash == [crawl.Done]
+}
+
+pub fn links_past_max_depth_are_not_queued_test() {
+  let settings =
+    crawl.Settings(
+      ..settings_with(["https://a.example/"]),
+      max_depth: option.Some(0),
+    )
+  let #(state, _) = crawl.new(settings, 0)
+  let #(_, effects) =
+    state
+    |> crawl.update(
+      succeeded("https://a.example/", ["https://a.example/second"], option.None),
+      100,
+    )
+
+  assert effects == [crawl.Done]
+}
+
+pub fn links_within_max_depth_are_still_queued_test() {
+  let settings =
+    crawl.Settings(
+      ..settings_with(["https://a.example/"]),
+      max_depth: option.Some(1),
+    )
+  let #(state, _) = crawl.new(settings, 0)
+  let #(_, effects) =
+    state
+    |> crawl.update(
+      succeeded("https://a.example/", ["https://b.example/1"], option.None),
+      100,
+    )
+
+  assert fetched_urls(effects) == ["https://b.example/1"]
 }
