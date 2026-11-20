@@ -4,24 +4,27 @@ I know this is LLM generated but this is my way of brainstorming and keeping tra
 
 ## Next: Page API (breaking)
 
-fetch → `extract_links` → normalize → `on_page` → scope → enqueue.
+fetch → prefill `links` → `on_page` → normalize → scope → enqueue.
 `fold` gets one `Visit` per URL, after retries.
 
-- [ ] Opaque `Page(item)` and `Link(url, nofollow)`; `page.new` for tests
-- [ ] Accessors `url`/`status`/`depth`/`links`/`item`, setters `with_item`/`nofollow`
-- [ ] `extract_links` replaces `next`, default `extract.anchors`; only way to add URLs
-- [ ] `on_page` for 2xx only, gets `Page(Nil)` + `Response`
-- [ ] `fold` over `Visit = Fetched | Redirected | Skipped | Failed`
+- [ ] Plain record `spoon/visit.Visit(item)`: `url`, `depth`, `outcome`, `links: List(Uri)`, `items: List(item)`
+- [ ] `Outcome = Responded(status) | Skipped(Skip) | Failed(Failure)`
 - [ ] `Skip = Disallowed | RobotsUnavailable`
-- [ ] `Failure = Status | Timeout | Network | Crashed(String) | InvalidUrl`
+- [ ] `Failure = Timeout | Network | Crashed(String) | InvalidUrl`
+- [ ] `HttpError` moves from `page` to `spoon/fetch`
+- [ ] `crawl` emits `GaveUp(scoop)` when retries run out, so `fold` sees each `Failed` once
+- [ ] Internal `prefill(Response) -> List(Uri)`: anchors minus `rel=nofollow`, `Location` on redirects, none on meta nofollow
+- [ ] `on_page(fn(Visit(item), Response(String)) -> Visit(item))` is the only hook; 2xx, not noindex
+- [ ] Builder generic in `item`; default `on_page` returns the visit unchanged
 - [ ] `max_pages` counts responses, not skips
 - [ ] No parent field; referrers come from inverting `links`
+- [ ] No `fold_until`; early stop is knobs, `links: []` or `spoon.stop`
+- [ ] Delete `middleware`; `redirect`/`content_type`/`anchors` move into `prefill`, `status_ok`/`log` go
+- [ ] Delete `next`, `Page`, `Link`, `Report`, old `Outcome`
 - [ ] `start` with `await`/`stop`/`stats`; `fold` = start + await, `run` = fold over Nil
 - [ ] `spoon.Error` instead of `actor.StartError`
-- [ ] Delete `prefetch`, `next`, `Outcome`, `Report`
-- [ ] `middleware` → pure `extract` helpers; `log` wraps a fold fn
 
-Checkpoint: a link graph and a dead-link report are each one `fold`.
+Checkpoint: `smoke_test` folds every URL, `/forbidden` and `/noindex` included; a link graph and a dead-link report are each one `fold`.
 
 ## Then: scope and bounds
 
@@ -44,7 +47,7 @@ Checkpoint: a link graph and a dead-link report are each one `fold`.
 
 ## Housekeeping
 
-- [ ] Tests for `normalize`, `resolve_url`, `extract`
+- [ ] Tests for `requestable.resolve` and `prefill`
 - [ ] Remove the demo
 
 ## Later / maybe

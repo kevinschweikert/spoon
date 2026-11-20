@@ -8,6 +8,8 @@ pub fn main() {
 
   spoon.new(url)
   |> spoon.max_pages(100)
+  |> spoon.max_depth(1)
+  |> spoon.allow_all_hosts
   |> spoon.delay(1000)
   |> spoon.on_page(on_site)
   |> spoon.fold([], fn(acc, _visited_url) { acc })

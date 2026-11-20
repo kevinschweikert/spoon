@@ -103,6 +103,14 @@ pub fn seed(builder: Builder(item), url: Requestable) -> Builder(item) {
   )
 }
 
+pub fn fetch(
+  builder: Builder(item),
+  fetch: fn(request.Request(String)) ->
+    Result(response.Response(String), page.HttpError),
+) {
+  Builder(config.Config(..builder.config, fetch:))
+}
+
 /// Callback when a new link was visited
 ///
 /// Override this if you want to use change the middleware or 

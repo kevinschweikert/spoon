@@ -10,6 +10,8 @@ pub type Scoop {
   Scoop(requestable: requestable.Requestable, depth: Int, attempts: Int)
 }
 
+// TODO: add a priority field and a priorityq in the slot to control which
+// scoops are sent when
 pub type Slot {
   Slot(
     scoops: deque.Deque(Scoop),
