@@ -54,9 +54,3 @@ pub fn add_link(page: Page(item), link: uri.Uri) -> Result(Page(item), Nil) {
 pub fn set_item(page: Page(item), item: item) -> Page(item) {
   Page(..page, item: option.Some(item))
 }
-
-pub type HttpError {
-  Throttled(retry_after_ms: option.Option(Int))
-  BadResponse
-  Network
-}

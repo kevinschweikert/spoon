@@ -2,9 +2,11 @@ import gleam/bool
 import gleam/list
 import gleam/option
 import gleam/set
+import gleam/string
 import grip/origin.{type Origin}
 import spoon/internal/frontier
 import spoon/internal/requestable
+import spoon/visit
 
 pub type Settings {
   Settings(
@@ -14,7 +16,13 @@ pub type Settings {
     max_pages: option.Option(Int),
     max_depth: option.Option(Int),
     max_attempts: Int,
+    scope: Scope,
   )
+}
+
+pub type Scope {
+  AllowAll
+  AllowedHosts(List(String))
 }
 
 pub type Crawl {
@@ -29,24 +37,37 @@ pub type Crawl {
   )
 }
 
-pub type Message {
-  Fetched(
-    scoop: frontier.Scoop,
-    crawl_delay_ms: option.Option(Int),
+pub type Attempt(item) {
+  Responded(
+    status: Int,
+    item: option.Option(item),
     links: List(requestable.Requestable),
   )
-  Failed(origin: Origin, retry_after: option.Option(Int))
-  Skipped(origin: Origin)
-  AfterWake
+  Skipped(visit.Skip)
+  Failed(visit.Failure)
 }
 
-pub type Effect {
+pub type Event(item) {
+  Attempted(
+    scoop: frontier.Scoop,
+    // this is the request rate from robots.txt
+    // only because theres only one message for policy response
+    // and fetched in the core.
+    // if core owns robots they can be split
+    crawl_delay_ms: option.Option(Int),
+    attempt: Attempt(item),
+  )
+  Woke
+}
+
+pub type Effect(item) {
   Fetch(frontier.Scoop)
   Wake(at: Int)
+  Emit(visit.Visit(item))
   Done
 }
 
-pub fn new(settings: Settings, now: Int) -> #(Crawl, List(Effect)) {
+pub fn new(settings: Settings, now: Int) -> #(Crawl, List(Effect(item))) {
   let crawl =
     Crawl(
       settings:,
@@ -57,38 +78,81 @@ pub fn new(settings: Settings, now: Int) -> #(Crawl, List(Effect)) {
 
   crawl
   |> push_links(option.None, settings.seeds, now)
-  |> next(now)
+  |> dispatch(now, [])
 }
 
-pub fn update(crawl: Crawl, msg: Message, now: Int) -> #(Crawl, List(Effect)) {
-  case msg {
-    Fetched(scoop:, crawl_delay_ms:, links:) ->
+pub fn update(
+  crawl: Crawl,
+  event: Event(item),
+  now: Int,
+) -> #(Crawl, List(Effect(item))) {
+  case event {
+    Woke -> dispatch(crawl, now, [])
+    Attempted(attempt:, scoop:, crawl_delay_ms:) -> {
       case frontier.in_flight_for(crawl.frontier, scoop.requestable.origin) {
-        option.None -> #(crawl, [])
-        option.Some(_) -> {
-          let crawl =
-            crawl
-            |> settle(scoop.requestable.origin, crawl_delay_ms, now)
-            |> increment_request()
-          crawl
-          |> push_links(option.Some(scoop), links, now)
-          |> next(now)
-        }
-      }
-    Skipped(origin:) ->
-      crawl |> settle(origin, option.Some(0), now) |> next(now)
-    Failed(origin:, retry_after:) ->
-      case frontier.in_flight_for(crawl.frontier, origin) {
-        option.Some(scoop) if scoop.attempts + 1 < crawl.settings.max_attempts -> {
-          crawl
-          |> requeue(origin, retry_after, now)
-        }
-        option.Some(_) -> crawl |> penalize(origin, retry_after, now)
-        option.None -> crawl
-      }
-      |> next(now)
+        option.Some(in_flight) if in_flight == scoop ->
+          case attempt {
+            Responded(links:, status:, item:) -> {
+              crawl
+              |> settle(scoop.requestable.origin, crawl_delay_ms, now)
+              |> increment_request()
+              |> push_links(
+                option.Some(scoop),
+                list.filter(links, in_scope(crawl.settings.scope, _)),
+                now,
+              )
+              |> dispatch(now, [
+                Emit(visit.Visit(
+                  parent: option.map(scoop.parent, requestable.to_uri),
+                  url: requestable.to_uri(scoop.requestable),
+                  depth: scoop.depth,
+                  outcome: visit.Responded(
+                    status:,
+                    item:,
+                    links: list.map(links, requestable.to_uri),
+                  ),
+                )),
+              ])
+            }
 
-    AfterWake -> next(crawl, now)
+            Skipped(skip) ->
+              crawl
+              |> settle(scoop.requestable.origin, option.Some(0), now)
+              |> dispatch(now, [
+                Emit(visit.Visit(
+                  parent: option.map(scoop.parent, requestable.to_uri),
+                  url: requestable.to_uri(scoop.requestable),
+                  depth: scoop.depth,
+                  outcome: visit.Skipped(skip),
+                )),
+              ])
+            Failed(failure) -> {
+              let retry_after = case failure {
+                visit.Throttled(retry_after_ms:) -> retry_after_ms
+                _ -> option.None
+              }
+              case scoop.attempts + 1 < crawl.settings.max_attempts {
+                True ->
+                  crawl
+                  |> requeue(scoop.requestable.origin, retry_after, now)
+                  |> dispatch(now, [])
+                False ->
+                  crawl
+                  |> penalize(scoop.requestable.origin, retry_after, now)
+                  |> dispatch(now, [
+                    Emit(visit.Visit(
+                      parent: option.map(scoop.parent, requestable.to_uri),
+                      url: requestable.to_uri(scoop.requestable),
+                      depth: scoop.depth,
+                      outcome: visit.Failed(failure),
+                    )),
+                  ])
+              }
+            }
+          }
+        option.None | option.Some(_) -> #(crawl, [])
+      }
+    }
   }
 }
 
@@ -117,6 +181,20 @@ fn push_links(
       _ -> crawl
     }
   })
+}
+
+fn in_scope(scope: Scope, link: requestable.Requestable) -> Bool {
+  case scope {
+    AllowAll -> True
+    AllowedHosts(hosts) -> {
+      requestable.to_uri(link).host
+      |> option.map(fn(host) {
+        hosts
+        |> list.contains(string.lowercase(host))
+      })
+      |> option.unwrap(False)
+    }
+  }
 }
 
 fn settle(
@@ -171,15 +249,15 @@ fn penalize(
   )
 }
 
-fn next(crawl: Crawl, now: Int) -> #(Crawl, List(Effect)) {
-  dispatch(crawl, now, [])
-}
+// fn next(crawl: Crawl, now: Int) -> #(Crawl, List(Effect(item))) {
+//   dispatch(crawl, now, [])
+// }
 
 fn dispatch(
   crawl: Crawl,
   now: Int,
-  effects: List(Effect),
-) -> #(Crawl, List(Effect)) {
+  effects: List(Effect(item)),
+) -> #(Crawl, List(Effect(item))) {
   use <- bool.guard(capacity_reached(crawl), finish(crawl, effects))
   let #(frontier, popped) = frontier.pop(crawl.frontier, now)
   {
@@ -195,7 +273,10 @@ fn dispatch(
   }
 }
 
-fn finish(crawl: Crawl, effects: List(Effect)) -> #(Crawl, List(Effect)) {
+fn finish(
+  crawl: Crawl,
+  effects: List(Effect(item)),
+) -> #(Crawl, List(Effect(item))) {
   case frontier.in_flight(crawl.frontier) == 0 {
     True -> #(crawl, list.reverse([Done, ..effects]))
     False -> #(crawl, list.reverse(effects))

@@ -10,9 +10,11 @@ import gleam/result
 import gleam/string
 import gleam/uri
 import logging
+import spoon/internal/crawl
 import spoon/internal/policy_cache
 import spoon/internal/requestable
 import spoon/internal/worker
+import spoon/visit
 
 import spoon/internal/config
 import spoon/internal/coordinator
@@ -79,8 +81,8 @@ pub fn new(url url: Requestable) -> Builder(Nil) {
       max_attempts: 3,
       respect_robots: True,
       scope: case requestable.to_uri(requestable).host {
-        option.Some(host) -> config.AllowedHosts([host])
-        option.None -> config.AllowedHosts([])
+        option.Some(host) -> crawl.AllowedHosts([host])
+        option.None -> crawl.AllowedHosts([])
       },
     ),
   )
@@ -104,7 +106,7 @@ pub fn seed(builder: Builder(item), url: Requestable) -> Builder(item) {
 pub fn fetch(
   builder: Builder(item),
   fetch: fn(request.Request(String)) ->
-    Result(response.Response(String), page.HttpError),
+    Result(response.Response(String), visit.Failure),
 ) {
   Builder(config.Config(..builder.config, fetch:))
 }
@@ -195,7 +197,7 @@ pub fn allowed_hosts(builder: Builder(item), allowed: List(String)) {
   Builder(
     config.Config(
       ..builder.config,
-      scope: config.AllowedHosts(list.map(allowed, string.lowercase)),
+      scope: crawl.AllowedHosts(list.map(allowed, string.lowercase)),
     ),
   )
 }
@@ -203,7 +205,7 @@ pub fn allowed_hosts(builder: Builder(item), allowed: List(String)) {
 /// Disables host matching and basically crawls the whole web.
 /// Use with caution!
 pub fn allow_all_hosts(builder: Builder(item)) {
-  Builder(config.Config(..builder.config, scope: config.AllowAll))
+  Builder(config.Config(..builder.config, scope: crawl.AllowAll))
 }
 
 /// Just runs the crawl and calls `on_page` for each page without any
@@ -222,7 +224,7 @@ pub fn run(builder: Builder(Nil)) -> Result(Nil, actor.StartError) {
 pub fn fold(
   builder: Builder(item),
   initial: acc,
-  combine: fn(acc, item) -> acc,
+  combine: fn(acc, visit.Visit(item)) -> acc,
 ) -> Result(acc, actor.StartError) {
   let coordinator_name = process.new_name("coordinator")
   let workers_name = process.new_name("workers")
@@ -242,7 +244,7 @@ pub fn fold(
 
 fn default_fetch(
   request: request.Request(String),
-) -> Result(response.Response(String), page.HttpError) {
+) -> Result(response.Response(String), visit.Failure) {
   // TODO: make the max size and redirect behaviour configurable by the user
   httpc.configure()
   |> httpc.follow_redirects(False)
@@ -251,11 +253,11 @@ fn default_fetch(
   |> httpc.dispatch(request)
   |> result.map_error(fn(err) {
     case err {
-      httpc.InvalidUtf8Response -> page.BadResponse
-      httpc.FailedToConnect(..) -> page.Network
-      httpc.ResponseTimeout -> page.Network
-      httpc.ResponseHeaderTooLarge -> page.BadResponse
-      httpc.ResponseBodyTooLarge -> page.BadResponse
+      httpc.InvalidUtf8Response -> visit.BadResponse
+      httpc.FailedToConnect(..) -> visit.Network
+      httpc.ResponseTimeout -> visit.Network
+      httpc.ResponseHeaderTooLarge -> visit.BadResponse
+      httpc.ResponseBodyTooLarge -> visit.BadResponse
     }
   })
 }
@@ -267,7 +269,7 @@ fn start_supervision_tree(
   config: config.Config(item),
   reply: process.Subject(acc),
   initial: acc,
-  combine: fn(acc, item) -> acc,
+  combine: fn(acc, visit.Visit(item)) -> acc,
 ) -> StartResult(_) {
   logging.configure()
 

@@ -7,7 +7,12 @@ import grip/origin.{type Origin}
 import spoon/internal/requestable
 
 pub type Scoop {
-  Scoop(requestable: requestable.Requestable, depth: Int, attempts: Int)
+  Scoop(
+    parent: option.Option(requestable.Requestable),
+    requestable: requestable.Requestable,
+    depth: Int,
+    attempts: Int,
+  )
 }
 
 // TODO: add a priority field and a priorityq in the slot to control which
@@ -42,6 +47,7 @@ pub fn new_scoop(
   requestable: requestable.Requestable,
 ) -> Scoop {
   Scoop(
+    parent: parent |> option.map(fn(scoop) { scoop.requestable }),
     depth: parent
       |> option.map(fn(scoop) { scoop.depth + 1 })
       |> option.unwrap(0),

@@ -20,12 +20,12 @@ import spoon/internal/config
 import spoon/internal/frontier
 import spoon/internal/requestable
 import spoon/internal/worker
-import spoon/page
+import spoon/visit
 
 type Waiting {
   Waiting(
     scoop: frontier.Scoop,
-    reply: process.Subject(Result(PolicyAnswer, page.HttpError)),
+    reply: process.Subject(Result(PolicyAnswer, visit.Failure)),
   )
 }
 
@@ -52,9 +52,9 @@ type Lookup {
 pub type Message {
   Check(
     scoop: frontier.Scoop,
-    reply: process.Subject(Result(PolicyAnswer, page.HttpError)),
+    reply: process.Subject(Result(PolicyAnswer, visit.Failure)),
   )
-  Policy(origin: origin.Origin, policy: Result(grip.Policy, page.HttpError))
+  Policy(origin: origin.Origin, policy: Result(grip.Policy, visit.Failure))
 }
 
 pub type PolicyAnswer {
@@ -170,7 +170,7 @@ fn spawn_fetch(
   name: process.Name(Message),
   worker_name: process.Name(worker.Message),
   fetch: fn(request.Request(String)) ->
-    Result(response.Response(String), page.HttpError),
+    Result(response.Response(String), visit.Failure),
   origin: origin.Origin,
   user_agent: String,
 ) -> Nil {
@@ -185,7 +185,7 @@ fn spawn_fetch(
         |> process.send(subject, _)
       },
       on_error: fn(_reason) {
-        Error(page.BadResponse)
+        Error(visit.BadResponse)
         |> Policy(origin:, policy: _)
         |> process.send(subject, _)
       },
@@ -209,21 +209,21 @@ fn is_fresh(fetched_at: timestamp.Timestamp) -> Bool {
 
 fn fetch_robots(
   fetch: fn(request.Request(String)) ->
-    Result(response.Response(String), page.HttpError),
+    Result(response.Response(String), visit.Failure),
   origin: origin.Origin,
   user_agent: String,
-) -> Result(grip.Policy, page.HttpError) {
+) -> Result(grip.Policy, visit.Failure) {
   let request =
     origin.robots_request(origin)
     |> request.set_header("user-agent", user_agent)
   use response <- result.try(
-    fetch(request) |> result.replace_error(page.BadResponse),
+    fetch(request) |> result.replace_error(visit.BadResponse),
   )
   grip.from_response(response)
   |> result.map_error(from_grip)
 }
 
-fn from_grip(grip_err: grip.Error) -> page.HttpError {
+fn from_grip(grip_err: grip.Error) -> visit.Failure {
   case grip_err {
     grip.RateLimited(retry_after:) -> {
       retry_after
@@ -237,9 +237,9 @@ fn from_grip(grip_err: grip.Error) -> page.HttpError {
             |> int.max(0)
         }
       })
-      |> page.Throttled
+      |> visit.Throttled
     }
-    grip.UnexpectedHttpStatusCode(_) -> page.BadResponse
+    grip.UnexpectedHttpStatusCode(_) -> visit.BadResponse
   }
 }
 

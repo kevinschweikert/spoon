@@ -9,18 +9,18 @@ Pure modules decide, processes only wire. Modules follow the domain, few and lar
 
 Modules: public `spoon`, `spoon/page`, `spoon/visit`; internal `requestable`, `frontier`, `crawl` (with `Attempt` and scope), `fetcher` (stages and link discovery), `robots`, `coordinator`, `worker`.
 
-| Word | Means | Module |
-|---|---|---|
-| `Requestable` | a checked address | `requestable` |
-| `Scoop` | a URL waiting in or taken from the frontier | `frontier` |
-| `Fetched` | a scoop with its response, inside the worker | `fetcher` |
-| `Attempt` | result of one try; may be retried | `crawl` |
-| `Visit` | final result for one URL; what `fold` gets | `visit` |
-| `Responded` / `Skipped` / `Failed` | the three outcomes, same in `Attempt` and `Visit` | |
-| `Skip` | why it wasn't fetched | `visit` |
-| `Failure` | why a try failed | `visit` |
-| `Attempted` | message: one try for this scoop is over | coordinator, crawl |
-| `Emit` | effect: hand this `Visit` to `fold` | crawl |
+| Word                               | Means                                             | Module             |
+| ---------------------------------- | ------------------------------------------------- | ------------------ |
+| `Requestable`                      | a checked address                                 | `requestable`      |
+| `Scoop`                            | a URL waiting in or taken from the frontier       | `frontier`         |
+| `Fetched`                          | a scoop with its response, inside the worker      | `fetcher`          |
+| `Attempt`                          | result of one try; may be retried                 | `crawl`            |
+| `Visit`                            | final result for one URL; what `fold` gets        | `visit`            |
+| `Responded` / `Skipped` / `Failed` | the three outcomes, same in `Attempt` and `Visit` |                    |
+| `Skip`                             | why it wasn't fetched                             | `visit`            |
+| `Failure`                          | why a try failed                                  | `visit`            |
+| `Attempted`                        | message: one try for this scoop is over           | coordinator, crawl |
+| `Emit`                             | effect: hand this `Visit` to `fold`               | crawl              |
 
 ```mermaid
 flowchart LR
@@ -52,7 +52,7 @@ sequenceDiagram
   C->>W: Fetch(scoop)
   W->>P: Check(scoop)
   P-->>W: allowed, delay
-  W-->>C: Attempted(scoop, attempt)
+  W-->>C: Attempted(scoop, crawl_delay_ms, attempt)
   C->>C: Emit → combine
 ```
 
@@ -73,23 +73,23 @@ sequenceDiagram
 
 ## Phase 0: commit
 
-- [ ] Commit the current green state
+- [x] Commit the current green state
 
 ## Phase 1: types
 
-- [ ] `visit.Skip = Disallowed | RobotsUnavailable`, renamed from `SkipReason`
-- [ ] `visit.Failure = Network | Timeout | Throttled(retry_after_ms) | BadResponse | Crashed`
-- [ ] Delete `HttpError`; transports return `visit.Failure`; `default_fetch` maps `ResponseTimeout` to `Timeout`
-- [ ] `crawl.Attempt(item) = Responded | Skipped(Skip) | Failed(Failure)`; `Responded` carries `Requestable` links and `crawl_delay_ms`; one message `Attempted(scoop, attempt)`, a worker crash sends `Failed(Crashed)`
+- [x] `visit.Skip = Disallowed | RobotsUnavailable`, renamed from `SkipReason`
+- [x] `visit.Failure = Network | Timeout | Throttled(retry_after_ms) | BadResponse | Crashed`
+- [x] Delete `HttpError`; transports return `visit.Failure`; `default_fetch` maps `ResponseTimeout` to `Timeout`
+- [x] `crawl.Attempt(item) = Responded | Skipped(Skip) | Failed(Failure)` replaces `fetcher.Attempt` and `crawl.Message`; `Responded` carries `Requestable` links; one message `Attempted(scoop, crawl_delay_ms, attempt)`, a worker crash sends `Failed(Crashed)` with no delay
 
 ## Phase 2: core
 
-- [ ] `crawl.update(Event(item)) -> List(Effect(item))`; `Event = Attempted | Woke`, `Effect = Fetch | Emit(Visit) | Wake | Done`
-- [ ] Scope, visit building and giving up move into `crawl`; coordinator only translates messages and runs effects
-- [ ] `crawl` emits `Emit(Visit(Failed))` when retries run out, so `fold` sees each `Failed` once
-- [ ] `Scoop.parent` and `Visit.parent: Option(Uri)`: first page the URL was found on, `None` for seeds; all referrers come from inverting `links`
-- [ ] `fold` gets a `Visit`; integration test asserts on visits, `/forbidden` and `/noindex` included
-- [ ] Fill `site_audit_builds_graph_with_redirect_edges_test`
+- [x] `crawl.update(Event(item)) -> List(Effect(item))`; `Event = Attempted | Woke`, `Effect = Fetch | Emit(Visit) | Wake | Done`
+- [x] Scope, visit building and giving up move into `crawl`; coordinator only translates messages and runs effects
+- [x] `crawl` emits `Emit(Visit(Failed))` when retries run out, so `fold` sees each `Failed` once
+- [x] `Scoop.parent` and `Visit.parent: Option(Uri)`: first page the URL was found on, `None` for seeds; all referrers come from inverting `links`
+- [x] `fold` gets a `Visit`; integration test asserts on visits, `/forbidden` and `/noindex` included
+- [x] Fill `site_audit_builds_graph_with_redirect_edges_test`
 
 ## Phase 3: fetcher stages
 
@@ -141,15 +141,23 @@ sequenceDiagram
 - [ ] Contract: never follow redirects, don't strip spoon's headers
 - [ ] Skip bodies by `Content-Type`/`Content-Length` where the transport can
 
+## Phase 7: crawl owns robots
+
+- [ ] First, frontier `Slot` lifecycle as an explicit union with `update`, no behavior change: `Slot(scoops, next_at, failures, state)`, only mutually exclusive state in the union
+- [ ] Frontier slot holds the origin's `grip.Policy`, its crawl delay and `fetched_at`; `crawl` decides allowed and delay, the worker never consults robots
+- [ ] `Effect.FetchRobots(origin)` and `Event.RobotsFetched(origin, Result(grip.Policy, Failure))`; the robots fetch holds the origin's in-flight slot, so no duplicate fetches
+- [ ] Slot waits for robots before its first `Fetch` and refetches when stale; `respect_robots: False` starts it ready
+- [ ] Disallowed scoops become `Emit(Visit(Skipped(Disallowed)))` without a worker; a failed robots fetch skips the origin's scoops with `RobotsUnavailable`
+- [ ] `Attempted(scoop, attempt)` drops `crawl_delay_ms`; `settle`, `requeue` and `penalize` read the delay from the slot
+- [ ] `policy_cache` process goes away; `robots` is pure fetch-free parsing and checking
+
 ## Housekeeping
 
 - [ ] Rename `policy_cache` to `robots`; name the domain, not the implementation
-- [ ] Remove the demo
 
 ## Later / maybe
 
 - [ ] Resumable crawls: swappable visited-set store, ETags, wall time only there
-- [ ] Frontier `Slot` lifecycle as an explicit union with `update`
 - [ ] JS target; only the OTP shell needs a counterpart
 - [ ] Links past `max_depth` as leaves; crawl marks seen before the depth guard, so a URL first found there never expands
 - [ ] Per-job deadline in the worker manager: `send_after` + kill → `Failed(TooSlow)`, not retried; a hung `scrape` currently blocks `Done` forever

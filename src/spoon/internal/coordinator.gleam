@@ -1,18 +1,13 @@
 import gleam/erlang/process
-import gleam/list
 import gleam/option
 import gleam/otp/actor
 import gleam/otp/supervision
-import gleam/string
-import grip/origin
 import spoon/internal/config
 import spoon/internal/crawl
 import spoon/internal/fetcher
-import spoon/internal/frontier
 import spoon/internal/policy_cache
-import spoon/internal/requestable
 import spoon/internal/worker
-import spoon/page
+import spoon/visit
 
 pub type Coordinator(item, acc) {
   Coordinator(
@@ -24,18 +19,13 @@ pub type Coordinator(item, acc) {
     crawl: crawl.Crawl,
     config: config.Config(item),
     accumulator: acc,
-    combine: fn(acc, item) -> acc,
+    combine: fn(acc, visit.Visit(item)) -> acc,
   )
 }
 
 pub type Message(item) {
-  Start(List(crawl.Effect))
-  FetcherDone(
-    scoop: frontier.Scoop,
-    crawl_delay_ms: option.Option(Int),
-    attempt: fetcher.Attempt(item),
-  )
-  FetcherDown(origin: origin.Origin)
+  Start(List(crawl.Effect(item)))
+  Crawl(crawl.Event(item))
   Wake
 }
 
@@ -43,7 +33,7 @@ pub fn supervised(
   name: process.Name(Message(item)),
   config: config.Config(item),
   initial: acc,
-  combine: fn(acc, item) -> acc,
+  combine: fn(acc, visit.Visit(item)) -> acc,
   reply: process.Subject(acc),
   workers: process.Name(worker.Message),
   policy_cache: process.Name(policy_cache.Message),
@@ -58,7 +48,7 @@ pub fn start(
   name: process.Name(Message(item)),
   config: config.Config(item),
   initial: acc,
-  combine: fn(acc, item) -> acc,
+  combine: fn(acc, visit.Visit(item)) -> acc,
   reply: process.Subject(acc),
   workers: process.Name(worker.Message),
   policy_cache: process.Name(policy_cache.Message),
@@ -74,6 +64,7 @@ pub fn start(
         max_pages: config.max_pages,
         max_attempts: config.max_attempts,
         max_depth: config.max_depth,
+        scope: config.scope,
       )
     let #(crawl, effects) = crawl.new(crawl_settings, now)
 
@@ -105,90 +96,23 @@ fn handle_message(
   let now = coordinator.config.clock()
   case message {
     Start(effects) -> execute(coordinator, effects, now)
-
-    FetcherDown(origin) -> {
-      let #(crawl, effects) =
-        crawl.update(coordinator.crawl, crawl.Failed(origin, option.None), now)
+    Crawl(event) -> {
+      let #(crawl, effects) = crawl.update(coordinator.crawl, event, now)
       Coordinator(..coordinator, crawl:)
       |> execute(effects, now)
     }
 
-    FetcherDone(scoop:, crawl_delay_ms:, attempt:) -> {
-      case attempt {
-        fetcher.Responded(links:, item:, ..) -> {
-          let accumulator = case item {
-            option.Some(item) ->
-              coordinator.combine(coordinator.accumulator, item)
-            option.None -> coordinator.accumulator
-          }
-          Coordinator(..coordinator, accumulator:)
-          |> advance(scoop, links, crawl_delay_ms, now)
-        }
-        fetcher.Skipped(_) -> {
-          let #(crawl, effects) =
-            crawl.update(
-              coordinator.crawl,
-              crawl.Skipped(scoop.requestable.origin),
-              now,
-            )
-          Coordinator(..coordinator, crawl:)
-          |> execute(effects, now)
-        }
-        fetcher.Errored(http_err) -> {
-          let delay_ms = case http_err {
-            page.Throttled(retry_after) -> retry_after
-            _ -> option.None
-          }
-
-          let #(crawl, effects) =
-            crawl.update(
-              coordinator.crawl,
-              crawl.Failed(scoop.requestable.origin, delay_ms),
-              now,
-            )
-          Coordinator(..coordinator, crawl:)
-          |> execute(effects, now)
-        }
-      }
-    }
     Wake -> {
-      let #(crawl, effects) =
-        crawl.update(coordinator.crawl, crawl.AfterWake, now)
+      let #(crawl, effects) = crawl.update(coordinator.crawl, crawl.Woke, now)
       Coordinator(..coordinator, crawl:)
       |> execute(effects, now)
     }
   }
 }
 
-fn advance(
-  coordinator: Coordinator(item, acc),
-  scoop: frontier.Scoop,
-  links: List(requestable.Requestable),
-  crawl_delay_ms: option.Option(Int),
-  now: Int,
-) -> actor.Next(Coordinator(item, acc), Message(item)) {
-  let links = filter_by_scope(links, coordinator.config.scope)
-
-  let #(crawl, effects) =
-    crawl.update(
-      coordinator.crawl,
-      crawl.Fetched(
-        scoop: scoop,
-        crawl_delay_ms: option.or(
-          crawl_delay_ms,
-          option.Some(coordinator.config.delay_ms),
-        ),
-        links:,
-      ),
-      now,
-    )
-  Coordinator(..coordinator, crawl:)
-  |> execute(effects, now)
-}
-
 fn execute(
   coordinator: Coordinator(item, acc),
-  effects: List(crawl.Effect),
+  effects: List(crawl.Effect(item)),
   now: Int,
 ) -> actor.Next(Coordinator(item, acc), a) {
   case effects {
@@ -201,17 +125,29 @@ fn execute(
       process.send_after(coordinator.self, at - now, Wake)
       execute(coordinator, rest, now)
     }
+    [crawl.Emit(visit), ..rest] -> {
+      let accumulator = coordinator.combine(coordinator.accumulator, visit)
+      Coordinator(..coordinator, accumulator:)
+      |> execute(rest, now)
+    }
+
     [crawl.Fetch(scoop), ..rest] -> {
       let Coordinator(self:, config:, policy_cache:, ..) = coordinator
       let job =
         worker.Job(
           run: fn() {
-            let #(crawl_delay_ms, attempt) =
-              fetcher.run(scoop, config, policy_cache)
-            process.send(self, FetcherDone(scoop:, crawl_delay_ms:, attempt:))
+            let attempted = fetcher.run(scoop, config, policy_cache)
+            process.send(self, Crawl(attempted))
           },
           on_error: fn(_reason) {
-            process.send(self, FetcherDown(origin: scoop.requestable.origin))
+            process.send(
+              self,
+              Crawl(crawl.Attempted(
+                scoop:,
+                attempt: crawl.Failed(visit.Crashed),
+                crawl_delay_ms: option.None,
+              )),
+            )
           },
         )
 
@@ -219,23 +155,4 @@ fn execute(
       execute(coordinator, rest, now)
     }
   }
-}
-
-fn filter_by_scope(
-  links: List(requestable.Requestable),
-  scope: config.Scope,
-) -> List(requestable.Requestable) {
-  list.filter(links, fn(link) {
-    case scope {
-      config.AllowAll -> True
-      config.AllowedHosts(hosts) -> {
-        requestable.to_uri(link).host
-        |> option.map(fn(host) {
-          hosts
-          |> list.contains(string.lowercase(host))
-        })
-        |> option.unwrap(False)
-      }
-    }
-  })
 }

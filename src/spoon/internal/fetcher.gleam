@@ -13,27 +13,18 @@ import gleam/time/timestamp
 import gleam/uri
 import presentable_soup as soup
 import spoon/internal/config
+import spoon/internal/crawl
 import spoon/internal/frontier
 import spoon/internal/policy_cache
 import spoon/internal/requestable
 import spoon/page
 import spoon/visit
 
-pub type Attempt(item) {
-  Responded(
-    status: Int,
-    links: List(requestable.Requestable),
-    item: option.Option(item),
-  )
-  Skipped(reason: visit.SkipReason)
-  Errored(error: page.HttpError)
-}
-
 pub fn run(
   scoop: frontier.Scoop,
   config: config.Config(item),
   policy_cache: process.Name(policy_cache.Message),
-) -> #(option.Option(Int), Attempt(item)) {
+) -> crawl.Event(item) {
   let config.Config(fetch:, scrape:, user_agent:, respect_robots:, ..) = config
   let policy_answer = case respect_robots {
     True ->
@@ -45,15 +36,36 @@ pub fn run(
   case policy_answer {
     Ok(policy_cache.PolicyAnswer(allowed:, delay_ms:)) -> {
       case allowed {
-        False -> #(delay_ms, Skipped(visit.Disallowed))
+        False ->
+          //#(delay_ms, crawl.Skipped(visit.Disallowed))
+          crawl.Attempted(
+            scoop:,
+            crawl_delay_ms: delay_ms,
+            attempt: crawl.Skipped(visit.Disallowed),
+          )
         True ->
           case do_fetch(scoop, user_agent, fetch) {
-            Ok(response) -> #(delay_ms, responded(scoop, response, scrape))
-            Error(err) -> #(delay_ms, Errored(err))
+            Ok(response) ->
+              crawl.Attempted(
+                scoop:,
+                crawl_delay_ms: delay_ms,
+                attempt: responded(scoop, response, scrape),
+              )
+            Error(failure) ->
+              crawl.Attempted(
+                scoop:,
+                crawl_delay_ms: delay_ms,
+                attempt: crawl.Failed(failure),
+              )
           }
       }
     }
-    Error(err) -> #(option.None, Errored(err))
+    Error(failure) ->
+      crawl.Attempted(
+        scoop:,
+        crawl_delay_ms: option.None,
+        attempt: crawl.Failed(failure),
+      )
   }
 }
 
@@ -61,7 +73,7 @@ fn responded(
   scoop: frontier.Scoop,
   response: response.Response(String),
   scrape: fn(page.Page(item), response.Response(String)) -> page.Page(item),
-) -> Attempt(item) {
+) -> crawl.Attempt(item) {
   let prefilled =
     page.from_scoop(scoop)
     |> prefill_anchors(response.body)
@@ -70,7 +82,7 @@ fn responded(
     True -> prefilled
     False -> scrape(prefilled, response)
   }
-  Responded(
+  crawl.Responded(
     status: response.status,
     links: page.requestable_links(scraped),
     item: page.item(scraped),
@@ -137,8 +149,8 @@ fn do_fetch(
   scoop: frontier.Scoop,
   user_agent: String,
   fetch: fn(request.Request(String)) ->
-    Result(response.Response(String), page.HttpError),
-) -> Result(response.Response(String), page.HttpError) {
+    Result(response.Response(String), visit.Failure),
+) -> Result(response.Response(String), visit.Failure) {
   let request = requestable.to_request(scoop.requestable, user_agent)
   use response <- result.try(fetch(request))
   case response.status {
@@ -146,7 +158,7 @@ fn do_fetch(
       response.get_header(response, "retry-after")
       |> result.try(parse_retry_after)
       |> option.from_result()
-      |> page.Throttled
+      |> visit.Throttled
       |> Error
     }
     _ -> Ok(response)
