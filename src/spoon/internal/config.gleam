@@ -15,8 +15,7 @@ pub type Config(item) {
     seeds: List(requestable.Requestable),
     fetch: fn(request.Request(String)) ->
       Result(response.Response(String), page.HttpError),
-    on_page: fn(page.Page) -> page.Outcome(item),
-    next: fn(response.Response(String)) -> List(page.Link),
+    scrape: fn(page.Page(item), response.Response(String)) -> page.Page(item),
     max_pages: option.Option(Int),
     max_concurrency: Int,
     user_agent: String,

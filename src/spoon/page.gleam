@@ -1,27 +1,58 @@
+import gleam/list
 import gleam/option
+import gleam/result
 import gleam/uri
+import spoon/internal/frontier
+import spoon/internal/requestable
 
+@internal
 pub type Link {
   Link(url: uri.Uri, nofollow: Bool)
 }
 
+@internal
 pub fn is_crawlable(link: Link) -> Bool {
   !link.nofollow
 }
 
-pub type Page {
-  Page(url: uri.Uri, status: Int, body: String, candidates: List(Link))
-}
-
-pub type Outcome(item) {
-  Outcome(item: item, candidates: List(Link))
+pub opaque type Page(item) {
+  Page(
+    url: requestable.Requestable,
+    depth: Int,
+    links: List(requestable.Requestable),
+    item: option.Option(item),
+  )
 }
 
 @internal
-pub type Report(item) {
-  Fetched(outcome: Outcome(item), crawl_delay_ms: option.Option(Int))
-  Noindex(candidates: List(Link), crawl_delay_ms: option.Option(Int))
-  Skipped
+pub fn from_scoop(scoop: frontier.Scoop) -> Page(item) {
+  Page(url: scoop.requestable, depth: scoop.depth, links: [], item: option.None)
+}
+
+pub fn url(page: Page(item)) -> uri.Uri {
+  page.url |> requestable.to_uri
+}
+
+pub fn links(page: Page(item)) -> List(uri.Uri) {
+  page.links |> list.map(requestable.to_uri)
+}
+
+pub fn item(page: Page(item)) -> option.Option(item) {
+  page.item
+}
+
+@internal
+pub fn requestable_links(page: Page(item)) -> List(requestable.Requestable) {
+  page.links
+}
+
+pub fn add_link(page: Page(item), link: uri.Uri) -> Result(Page(item), Nil) {
+  use requestable <- result.try(requestable.resolve(page.url, link))
+  Ok(Page(..page, links: [requestable, ..page.links]))
+}
+
+pub fn set_item(page: Page(item), item: item) -> Page(item) {
+  Page(..page, item: option.Some(item))
 }
 
 pub type HttpError {

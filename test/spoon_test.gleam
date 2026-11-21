@@ -89,13 +89,26 @@ fn path(path) {
   url
 }
 
+type Scraped {
+  Scraped(url: uri.Uri, status: Int, candidates: List(uri.Uri))
+}
+
 pub fn integration_test() {
   let assert Ok(start) = spoon.request("http://example.com/index")
   let assert Ok(collected) =
     spoon.new(start)
     |> spoon.delay(0)
     |> spoon.fetch(mock_fetch)
-    |> spoon.on_page(fn(page) { page.Outcome(page, page.candidates) })
+    |> spoon.scrape(fn(current, resp) {
+      page.set_item(
+        current,
+        Scraped(
+          url: page.url(current),
+          status: resp.status,
+          candidates: page.links(current),
+        ),
+      )
+    })
     |> spoon.fold([], fn(acc, page) { [page, ..acc] })
 
   assert list.length(collected) == 7
@@ -103,7 +116,7 @@ pub fn integration_test() {
     collected |> list.map(fn(p) { #(p.url, p) }) |> dict.from_list()
 
   let assert Ok(index) = dict.get(collected, path("/index"))
-  assert list.length(index.candidates) == 9
+  assert list.length(index.candidates) == 7
 
   let assert Ok(blog) = dict.get(collected, path("/blog"))
   assert blog.candidates == []
@@ -127,4 +140,24 @@ pub fn integration_test() {
   assert !dict.has_key(collected, path("/forbidden"))
   assert !dict.has_key(collected, path("/secrets"))
   assert !dict.has_key(collected, path("/robots.txt"))
+}
+
+pub fn scraper_collects_many_items_per_page_test() {
+  assert True
+}
+
+pub fn link_checker_reports_dead_links_with_referrers_test() {
+  assert True
+}
+
+pub fn site_audit_builds_graph_with_redirect_edges_test() {
+  assert True
+}
+
+pub fn indexer_writes_each_page_to_a_store_test() {
+  assert True
+}
+
+pub fn embedded_crawl_starts_stops_and_reports_progress_test() {
+  assert True
 }

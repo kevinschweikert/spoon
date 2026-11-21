@@ -1,36 +1,9 @@
-import gleam/dict
 import gleam/http/response
-import gleam/int
-import gleam/io
 import gleam/list
 import gleam/result
 import gleam/string
-import gleam/time/calendar
-import gleam/time/timestamp
 import gleam/uri
-import presentable_soup as soup
 import spoon/page
-
-pub fn log(
-  page: page.Page,
-  handle: fn(page.Page) -> page.Outcome(item),
-) -> page.Outcome(item) {
-  let url = page.url |> uri.to_string
-  let now = timestamp.system_time() |> timestamp.to_rfc3339(calendar.utc_offset)
-  io.println(now <> " " <> int.to_string(page.status) <> " " <> url)
-  handle(page)
-}
-
-pub fn status_ok(
-  if_not: item,
-  page: page.Page,
-  handle: fn(page.Page) -> page.Outcome(item),
-) -> page.Outcome(item) {
-  case page.status >= 200 && page.status < 400 {
-    True -> handle(page)
-    False -> page.Outcome(item: if_not, candidates: [])
-  }
-}
 
 pub fn redirect(
   resp: response.Response(String),
@@ -62,30 +35,4 @@ pub fn content_type(
       }
     Error(_) -> []
   }
-}
-
-pub fn anchors(body: String) -> List(page.Link) {
-  let anchors =
-    [soup.with_tag("a")]
-    |> soup.elements()
-    |> soup.return(soup.attributes())
-    |> soup.scrape(body)
-    |> result.unwrap([])
-
-  use anchor <- list.filter_map(anchors)
-  let attributes = dict.from_list(anchor)
-  use href <- result.try(dict.get(attributes, "href"))
-  use url <- result.try(uri.parse(href))
-  let link = page.Link(url:, nofollow: False)
-  case dict.get(attributes, "rel") |> result.map(is_nofollow) {
-    Ok(True) -> Ok(page.Link(..link, nofollow: True))
-    _ -> Ok(link)
-  }
-}
-
-fn is_nofollow(rel: String) -> Bool {
-  rel
-  |> string.lowercase
-  |> string.split(" ")
-  |> list.contains("nofollow")
 }

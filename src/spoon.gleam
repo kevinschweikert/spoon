@@ -16,7 +16,6 @@ import spoon/internal/worker
 
 import spoon/internal/config
 import spoon/internal/coordinator
-import spoon/middleware
 import spoon/page
 
 pub opaque type Requestable {
@@ -70,8 +69,7 @@ pub fn new(url url: Requestable) -> Builder(Nil) {
       base_url: requestable,
       seeds: [],
       fetch: default_fetch,
-      on_page: default_on_page,
-      next: default_next,
+      scrape: fn(page, _response) { page },
       max_pages: option.Some(10),
       max_depth: option.None,
       max_concurrency: 10,
@@ -119,23 +117,11 @@ pub fn fetch(
 /// Default is using the following middlewares:
 ///
 /// - `middleware.status_ok`
-pub fn on_page(
+pub fn scrape(
   builder: Builder(a),
-  on_page: fn(page.Page) -> page.Outcome(b),
-) -> Builder(b) {
-  Builder(config.Config(..builder.config, on_page:))
-}
-
-/// Callback after a page got visited to get the next potential
-/// candidates to visit next.
-///
-/// By default it will look for all html `<a>` tags and extract
-/// their `href` attributes.
-pub fn next(
-  builder: Builder(item),
-  next: fn(response.Response(String)) -> List(page.Link),
+  scrape: fn(page.Page(item), response.Response(String)) -> page.Page(item),
 ) -> Builder(item) {
-  Builder(config.Config(..builder.config, next:))
+  Builder(config.Config(..builder.config, scrape:))
 }
 
 /// Sets the maximum number of pages after the crawl will be
@@ -252,20 +238,6 @@ pub fn fold(
     combine,
   ))
   Ok(process.receive_forever(reply))
-}
-
-fn default_on_page(page: page.Page) -> page.Outcome(Nil) {
-  use page <- middleware.status_ok(Nil, page)
-  page.Outcome(item: Nil, candidates: page.candidates)
-}
-
-fn default_next(resp: response.Response(String)) -> List(page.Link) {
-  use resp <- middleware.redirect(resp)
-  use resp <- middleware.content_type(
-    ["text/html", "text/plain", "application/xml"],
-    resp,
-  )
-  middleware.anchors(resp.body)
 }
 
 fn default_fetch(

@@ -1,25 +1,16 @@
-import gleam/dict
 import gleam/erlang/process
-import gleam/http/request
-import gleam/http/response
-import gleam/int
 import gleam/list
 import gleam/option
 import gleam/otp/actor
 import gleam/otp/supervision
-import gleam/result
 import gleam/string
-import gleam/time/duration
-import gleam/time/timestamp
 import grip/origin
-import presentable_soup as soup
 import spoon/internal/config
 import spoon/internal/crawl
+import spoon/internal/fetcher
 import spoon/internal/frontier
 import spoon/internal/policy_cache
 import spoon/internal/requestable
-
-// import spoon/internal/policy_cache
 import spoon/internal/worker
 import spoon/page
 
@@ -39,9 +30,10 @@ pub type Coordinator(item, acc) {
 
 pub type Message(item) {
   Start(List(crawl.Effect))
-  Reported(
+  FetcherDone(
     scoop: frontier.Scoop,
-    report: Result(page.Report(item), page.HttpError),
+    crawl_delay_ms: option.Option(Int),
+    attempt: fetcher.Attempt(item),
   )
   FetcherDown(origin: origin.Origin)
   Wake
@@ -121,31 +113,28 @@ fn handle_message(
       |> execute(effects, now)
     }
 
-    Reported(scoop:, report:) -> {
-      case report {
-        Ok(report) ->
-          case report {
-            page.Noindex(candidates:, crawl_delay_ms:) -> {
-              advance(coordinator, scoop, candidates, crawl_delay_ms, now)
-            }
-            page.Fetched(outcome:, crawl_delay_ms:) -> {
-              let accumulator =
-                coordinator.combine(coordinator.accumulator, outcome.item)
-              Coordinator(..coordinator, accumulator:)
-              |> advance(scoop, outcome.candidates, crawl_delay_ms, now)
-            }
-            page.Skipped -> {
-              let #(crawl, effects) =
-                crawl.update(
-                  coordinator.crawl,
-                  crawl.Skipped(scoop.requestable.origin),
-                  now,
-                )
-              Coordinator(..coordinator, crawl:)
-              |> execute(effects, now)
-            }
+    FetcherDone(scoop:, crawl_delay_ms:, attempt:) -> {
+      case attempt {
+        fetcher.Responded(links:, item:, ..) -> {
+          let accumulator = case item {
+            option.Some(item) ->
+              coordinator.combine(coordinator.accumulator, item)
+            option.None -> coordinator.accumulator
           }
-        Error(http_err) -> {
+          Coordinator(..coordinator, accumulator:)
+          |> advance(scoop, links, crawl_delay_ms, now)
+        }
+        fetcher.Skipped(_) -> {
+          let #(crawl, effects) =
+            crawl.update(
+              coordinator.crawl,
+              crawl.Skipped(scoop.requestable.origin),
+              now,
+            )
+          Coordinator(..coordinator, crawl:)
+          |> execute(effects, now)
+        }
+        fetcher.Errored(http_err) -> {
           let delay_ms = case http_err {
             page.Throttled(retry_after) -> retry_after
             _ -> option.None
@@ -174,17 +163,11 @@ fn handle_message(
 fn advance(
   coordinator: Coordinator(item, acc),
   scoop: frontier.Scoop,
-  links: List(page.Link),
+  links: List(requestable.Requestable),
   crawl_delay_ms: option.Option(Int),
   now: Int,
 ) -> actor.Next(Coordinator(item, acc), Message(item)) {
-  let links =
-    links
-    |> list.filter(page.is_crawlable)
-    |> list.filter_map(fn(link) {
-      requestable.resolve(scoop.requestable, link.url)
-    })
-    |> filter_by_scope(coordinator.config.scope)
+  let links = filter_by_scope(links, coordinator.config.scope)
 
   let #(crawl, effects) =
     crawl.update(
@@ -219,139 +202,23 @@ fn execute(
       execute(coordinator, rest, now)
     }
     [crawl.Fetch(scoop), ..rest] -> {
-      let Coordinator(self: coordinator_subject, config:, policy_cache:, ..) =
-        coordinator
-      let config.Config(
-        fetch:,
-        next:,
-        on_page:,
-        user_agent:,
-        respect_robots:,
-        ..,
-      ) = config
-      let fetcher = fn() {
-        let policy_answer = case respect_robots {
-          True ->
-            process.call(process.named_subject(policy_cache), 10_000, fn(reply) {
-              policy_cache.Check(scoop:, reply:)
-            })
-          False -> Ok(policy_cache.PolicyAnswer(True, option.None))
-        }
-        case policy_answer {
-          Ok(policy_cache.PolicyAnswer(allowed:, delay_ms:)) -> {
-            case allowed {
-              False -> {
-                Ok(page.Skipped)
-                |> Reported(scoop:, report: _)
-                |> process.send(coordinator_subject, _)
-              }
-              True -> {
-                do_fetch(scoop, user_agent, fetch)
-                |> result.map(fn(response) {
-                  case http_ok(response.status) && is_noindex(response.body) {
-                    True ->
-                      page.Noindex(
-                        candidates: next(response),
-                        crawl_delay_ms: delay_ms,
-                      )
-                    False ->
-                      page.Page(
-                        url: requestable.to_uri(scoop.requestable),
-                        status: response.status,
-                        body: response.body,
-                        candidates: next(response),
-                      )
-                      |> on_page()
-                      |> page.Fetched(delay_ms)
-                  }
-                })
-                |> Reported(scoop:, report: _)
-                |> process.send(coordinator_subject, _)
-              }
-            }
-          }
-          Error(err) -> {
-            Error(err)
-            |> Reported(scoop:, report: _)
-            |> process.send(coordinator_subject, _)
-          }
-        }
-      }
+      let Coordinator(self:, config:, policy_cache:, ..) = coordinator
       let job =
-        worker.Job(run: fetcher, on_error: fn(_reason) {
-          process.send(
-            coordinator_subject,
-            FetcherDown(origin: scoop.requestable.origin),
-          )
-        })
+        worker.Job(
+          run: fn() {
+            let #(crawl_delay_ms, attempt) =
+              fetcher.run(scoop, config, policy_cache)
+            process.send(self, FetcherDone(scoop:, crawl_delay_ms:, attempt:))
+          },
+          on_error: fn(_reason) {
+            process.send(self, FetcherDown(origin: scoop.requestable.origin))
+          },
+        )
 
       worker.start_job(coordinator.workers, job)
       execute(coordinator, rest, now)
     }
   }
-}
-
-fn http_ok(status: Int) -> Bool {
-  status >= 200 && status <= 299
-}
-
-fn do_fetch(
-  scoop: frontier.Scoop,
-  user_agent: String,
-  fetch: fn(request.Request(String)) ->
-    Result(response.Response(String), page.HttpError),
-) -> Result(response.Response(String), page.HttpError) {
-  let request = requestable.to_request(scoop.requestable, user_agent)
-  use response <- result.try(fetch(request))
-  case response.status {
-    429 | 503 -> {
-      response.get_header(response, "retry-after")
-      |> result.try(parse_retry_after)
-      |> option.from_result()
-      |> page.Throttled
-      |> Error
-    }
-    _ -> Ok(response)
-  }
-}
-
-fn is_noindex(body: String) -> Bool {
-  let metas =
-    [soup.with_tag("meta")]
-    |> soup.elements()
-    |> soup.return(soup.attributes())
-    |> soup.scrape(body)
-    |> result.unwrap([])
-
-  use meta <- list.any(metas)
-  let attrs = dict.from_list(meta)
-  case dict.get(attrs, "name"), dict.get(attrs, "content") {
-    Ok(name), Ok(content) ->
-      string.trim(string.lowercase(name)) == "robots"
-      && string.contains(string.lowercase(content), "noindex")
-    _, _ -> False
-  }
-}
-
-fn parse_retry_after(value: String) -> Result(Int, Nil) {
-  let value = string.trim(value)
-  parse_delay(value)
-  |> result.lazy_or(fn() { parse_http_date(value) })
-}
-
-fn parse_delay(value: String) -> Result(Int, Nil) {
-  case int.parse(value) {
-    Ok(delay) if delay >= 0 -> Ok(delay)
-    _ -> Error(Nil)
-  }
-}
-
-fn parse_http_date(value: String) -> Result(Int, Nil) {
-  use at <- result.map(timestamp.parse_http_date(value))
-  timestamp.system_time()
-  |> timestamp.difference(at)
-  |> duration.to_milliseconds()
-  |> int.max(0)
 }
 
 fn filter_by_scope(
